@@ -1,0 +1,15 @@
+name: Long-running checks (inactive)
+
+# Not active yet: enable a schedule after fuzz, mutation, and soak jobs are implemented.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report inactive status
+        run: echo "::notice::Fuzz, mutation, and soak checks are not configured yet."
