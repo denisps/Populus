@@ -1,0 +1,5 @@
+/target/
+/metrics/*.json
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/coverage/

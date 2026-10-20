@@ -1,0 +1,7 @@
+[binary]
+annotate_increase_percent = 2
+require_justification_increase_percent = 5
+
+[hot_path]
+investigate_instruction_increase_percent = 5
+require_approval_instruction_increase_percent = 10
