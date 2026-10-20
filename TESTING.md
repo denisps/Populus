@@ -122,6 +122,7 @@ Example:
 
 ```text
 ID-001  NodeId and ClientId use separate hash domains.
+ID-002  IPv6 identities are normalized to /48; ineligible addresses are rejected
 ROUTE-001  Authorities are selected by XOR distance to RoutingKey.
 AUTH-001  Normal authority count is four.
 INGEST-001  Pending report survives until all four authority ACKs.
@@ -276,6 +277,7 @@ Golden vectors are mandatory for:
 ```text
 NodeId derivation
 ClientId derivation
+NetworkIdentity normalization and eligibility (ID-002, see ARCHITECTURE.md section 2.2)
 ProducerId derivation
 RoutingKey derivation
 canonical content encoding

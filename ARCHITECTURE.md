@@ -6,7 +6,9 @@
 
 This document describes the current strongest design candidate.
 
-Some mechanisms, especially delegated-client assignment, threshold tuning, IPv6 scarcity normalization, and Byzantine outlier thresholds, remain intentionally experimental until simulation provides evidence.
+Some mechanisms, especially delegated-client assignment, threshold tuning, and Byzantine outlier thresholds, remain intentionally experimental until simulation provides evidence.
+
+IPv6 scarcity normalization is specified as v1 policy in section 2.2. It remains subject to validation by the Phase 16 NAT/IPv6/Sybil scenarios.
 
 The architecture should preserve the ability to replace these policies without rewriting the transport or content model.
 
@@ -70,10 +72,108 @@ Conceptually:
 
 ```text
 IPv4 -> public /32
-IPv6 -> normalized assigned prefix
+IPv6 -> normalized assigned prefix (v1 policy below)
 ```
 
-The exact IPv6 prefix policy remains to be finalized.
+### Design priority
+
+Sybil resistance is more important than inclusiveness. Over-merging many real users into one identity is acceptable; letting one actor mint many identities is not.
+
+### Eligibility (v1)
+
+An address that is not eligible is rejected with a typed error. It never produces a NetworkIdentity. Rejection must not panic.
+
+IPv6 rejected classes:
+
+```text
+unspecified (::)
+loopback (::1)
+link-local (fe80::/10)
+multicast (ff00::/8)
+unique-local (fc00::/7)
+documentation (2001:db8::/32)
+site-local / deprecated (fec0::/10)
+discard (100::/64)
+Teredo (2001::/32; deprecated, not the host's real prefix)
+NAT64 (64:ff9b::/96 and 64:ff9b:1::/48)
+IPv4-compatible (::/96; deprecated)
+anything outside global unicast 2000::/3
+```
+
+IPv4 rejected classes:
+
+```text
+private (10/8, 172.16/12, 192.168/16)
+loopback (127/8)
+link-local (169.254/16)
+CGNAT (100.64/10)
+multicast (224/4)
+reserved and broadcast (240/4, 255.255.255.255)
+unspecified (0/8)
+documentation (192.0.2/24, 198.51.100/24, 203.0.113/24)
+```
+
+### Normalization (v1)
+
+Applied in order after the eligibility checks:
+
+```text
+1. IPv4-mapped IPv6 (::ffff:0:0/96) -> the embedded IPv4 address, as an IPv4 /32 identity.
+   The embedded IPv4 address must itself be eligible.
+2. 6to4 (2002::/16) -> the embedded IPv4 address, as an IPv4 /32 identity.
+   The scarce resource is that IPv4 address. This prevents 6to4 from giving an
+   attacker a free /48 per IPv4 address, and prevents one IPv4 address from
+   yielding both an IPv4 and an IPv6 identity. The embedded IPv4 must be eligible.
+3. Any other global unicast IPv6 address -> truncated to its /48 (low 80 bits zeroed).
+```
+
+Rationale for /48: it is the standard maximum end-site allocation, and it is freely available to attackers through tunnel brokers and cheap hosting (65,536 /64s each). Anything finer than /48 would let a single actor mint many identities, so /64 and /56 are rejected for that reason.
+
+Accepted cost: users who share a /48 (large mobile or ISP pools, campuses) collapse into one identity.
+
+### Canonical encoding of NetworkIdentity
+
+Length-delimited and family-tagged:
+
+```text
+IPv4: 0x04 || 4 octets
+IPv6: 0x06 || 6 octets   (the /48 prefix)
+```
+
+The normalized value is what is hashed under the domains in sections 2.3 and 2.4. An IPv4 identity (5 bytes) and an IPv6 identity (7 bytes) cannot collide, because of the family tag and the different lengths.
+
+### Versioning and compatibility
+
+The policy version is bound to the hash domains (`populus/node/v1`, `populus/client/v1`). Any change to the prefix length or to eligibility is a protocol change. It requires a new domain version (`.../v2`), an ARCHITECTURE.md update, new test vectors, and a mixed-version consideration, because NodeIds and ClientIds from different versions are unrelated.
+
+### Implementation requirements
+
+The policy must be implemented as one pure function with typed errors in `populus-types` (Phase 1). It must not be duplicated elsewhere.
+
+Required Phase 1 tests and vectors (invariant ID-002):
+
+```text
+one rejection test per eligibility class (IPv4 and IPv6)
+IPv4-mapped collapses to the embedded IPv4 identity
+6to4 collapses to the embedded IPv4 identity
+two addresses in the same /48 -> same identity
+adjacent /48s -> different identities
+IPv4 and IPv6 identities never equal
+golden hash vectors for NodeId and ClientId
+```
+
+### Known residual weaknesses
+
+```text
+attackers holding multiple /48s or many IPv4 addresses (cloud providers and
+tunnel brokers can provide several /48s per account)
+mobile carrier pools and other shared prefixes (over-merging)
+privacy: a /48 or IPv4 hash is enumerable (see the section 2.4 caveat)
+```
+
+### Future work
+
+Adaptive aggregation, for example treating an announced BGP prefix or a provider /32 as a rate-limited bucket, is out of scope for v1. It should be evaluated with the Phase 16 Sybil and eclipse simulations.
 
 This identity is imperfect.
 
@@ -993,7 +1093,7 @@ Hashing IPv4 does not hide it from enumeration.
 
 ## IPv6 normalization
 
-The protocol needs a deterministic method for deciding which IPv6 prefix represents one scarce allocation.
+Specified as v1 policy in section 2.2 (/48 truncation, 6to4 and IPv4-mapped collapse, strict eligibility). Remaining work is validation in the Phase 16 NAT/IPv6/Sybil scenarios.
 
 ## NAT fairness
 
