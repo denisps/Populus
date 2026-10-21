@@ -206,7 +206,7 @@ direct alternatives considered
 enabled features
 transitive dependency delta
 binary-size delta
-license
+license (see [Licensing](#licensing))
 maintenance status
 ```
 
@@ -228,6 +228,28 @@ default-features = false
 when broad defaults are unnecessary.
 
 Dev-only tools are less sensitive to runtime bloat but still affect build complexity and supply-chain surface.
+
+## Licensing
+
+Populus is licensed under the MIT license (see `LICENSE`).
+
+Contributions are accepted under the same license (inbound = outbound).
+
+Every workspace crate must inherit the license:
+
+```toml
+license.workspace = true
+```
+
+Only permissively licensed dependencies are allowed, as listed in the `deny.toml` allow-list. Copyleft (GPL, AGPL, LGPL, MPL, SSPL, etc.) and unlicensed dependencies are not allowed.
+
+Adding any license to the allow-list requires explicit maintainer review.
+
+`cargo deny check licenses` enforces this and is part of `cargo xtask gate commit`.
+
+Copied or vendored code must preserve its original copyright notice and license text, and must be recorded (for example in `THIRD_PARTY_NOTICES.md` or in the PR description). Large copied code needs justification.
+
+Do not paste code from incompatible sources, or AI output that reproduces licensed code verbatim.
 
 ## Unsafe Rust
 

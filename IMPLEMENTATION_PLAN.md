@@ -455,6 +455,8 @@ RoutingKey = fixed-width hash used for XOR distance
 ContentId = immutable content identity
 MutableContentId = stable identity for mutable content
 PeerId remains libp2p transport identity
+NetworkIdentity normalization follows ARCHITECTURE.md section 2.2 (ID-002):
+  one pure function with typed errors in populus-types, IPv6 -> /48, ineligible addresses rejected
 ```
 
 Do not allow implicit conversion between these ID types.
