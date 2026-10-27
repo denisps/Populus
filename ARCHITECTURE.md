@@ -83,7 +83,8 @@ Sybil resistance is more important than inclusiveness. Over-merging many real us
 
 An address that is not eligible is rejected with a typed error. It never produces a NetworkIdentity. Rejection must not panic.
 
-IPv6 rejected classes:
+The following IPv6 rejected classes apply to ordinary IPv6 addresses after the
+IPv4-mapped and 6to4 forms have been classified below:
 
 ```text
 unspecified (::)
@@ -113,19 +114,38 @@ unspecified (0/8)
 documentation (192.0.2/24, 198.51.100/24, 203.0.113/24)
 ```
 
-### Normalization (v1)
+### Classification, eligibility, and normalization (v1)
 
-Applied in order after the eligibility checks:
+Address processing is performed by one pure normalization function. Eligibility
+is evaluated against the effective scarcity resource, which may differ from
+the syntactic IP family supplied by the caller.
+
+Processing order:
 
 ```text
-1. IPv4-mapped IPv6 (::ffff:0:0/96) -> the embedded IPv4 address, as an IPv4 /32 identity.
-   The embedded IPv4 address must itself be eligible.
-2. 6to4 (2002::/16) -> the embedded IPv4 address, as an IPv4 /32 identity.
+1. Native IPv4:
+   Apply IPv4 eligibility rules. If eligible, use the address as an IPv4 /32 identity.
+2. IPv4-mapped IPv6 (::ffff:0:0/96):
+   Treat this as an IPv4 representation, not an IPv6 scarcity resource. Extract the
+   embedded IPv4 address, apply IPv4 eligibility rules, and if eligible produce the
+   same IPv4 /32 identity as the native IPv4 representation.
+3. 6to4 IPv6 (2002::/16):
+   Extract the embedded IPv4 address, apply IPv4 eligibility rules, and if eligible
+   use that IPv4 /32 identity.
    The scarce resource is that IPv4 address. This prevents 6to4 from giving an
    attacker a free /48 per IPv4 address, and prevents one IPv4 address from
-   yielding both an IPv4 and an IPv6 identity. The embedded IPv4 must be eligible.
-3. Any other global unicast IPv6 address -> truncated to its /48 (low 80 bits zeroed).
+   yielding both an IPv4 and a 6to4 identity.
+4. All other IPv6:
+   Apply IPv6 eligibility rules. The address must be eligible global unicast under
+   the v1 policy, including membership in 2000::/3 and exclusion of the specifically
+   rejected ranges. If eligible, truncate it to its /48 (low 80 bits zeroed).
 ```
+
+The embedded IPv4 address in either transition form must pass the same IPv4
+eligibility checks as a native IPv4 address. For example, `::ffff:8.8.8.8` and
+`8.8.8.8` identify the same scarcity resource, while `::ffff:10.0.0.1` is rejected.
+Ordinary IPv6 addresses outside `2000::/3` are rejected; mapped and 6to4 addresses
+are classified before that IPv6-only eligibility check.
 
 Rationale for /48: it is the standard maximum end-site allocation, and it is freely available to attackers through tunnel brokers and cheap hosting (65,536 /64s each). Anything finer than /48 would let a single actor mint many identities, so /64 and /56 are rejected for that reason.
 
@@ -195,7 +215,7 @@ It is intended to make mass identity creation costly, not to prove one-human-one
 
 ```text
 NodeId =
-    H("populus/node/v1" || NetworkIdentity)
+    domain_hash("populus/node/v1", canonical NetworkIdentity encoding)
 ```
 
 NodeIds determine position in the Populus XOR DHT.
@@ -206,7 +226,7 @@ Because NetworkIdentity is hashed, neighboring IP addresses do not produce neigh
 
 ```text
 ClientId =
-    H("populus/client/v1" || NetworkIdentity)
+    domain_hash("populus/client/v1", canonical NetworkIdentity encoding)
 ```
 
 ClientId is used for popularity voting/deduplication.
@@ -228,7 +248,8 @@ A producer is identified cryptographically.
 Conceptually:
 
 ```text
-ProducerId = hash(public_key)
+ProducerId =
+    domain_hash("populus/producer/v1", u8(algorithm) || public_key)
 ```
 
 Producer identity represents authorship and subscriptions.
@@ -263,6 +284,10 @@ immutable RevisionCID for each revision
 
 Each revision links to its predecessor where appropriate.
 
+For v1, `MutableContentId` is the domain-separated hash of the genesis revision's
+`ContentId` bytes under `populus/mutable/v1`. It is stable for the lifetime of the
+mutable object; later revision CIDs do not change it.
+
 ## 2.8 RoutingKey
 
 XOR routing operates on a fixed-width uniformly distributed key.
@@ -271,10 +296,51 @@ Logical identifiers are converted through domain-separated hashing:
 
 ```text
 RoutingKey =
-    H("populus/routing/v1" || logical_identifier)
+    domain_hash("populus/routing/v1", u8(kind) || logical_identifier)
 ```
 
 This avoids treating an encoded CID or other variable-format identifier directly as a uniformly random XOR key.
+
+## 2.9 Versioned hash and identifier encodings
+
+The exact v1 construction is:
+
+```text
+domain_hash(domain, payload) =
+    SHA-256(u8(len(domain)) || domain_ascii ||
+            u32_be(len(payload)) || payload)
+```
+
+The one-byte domain length and four-byte big-endian payload length make the
+preimage unambiguous. Domain strings are ASCII and versioned. This construction
+refines the conceptual `H("populus/.../v1" || ...)` notation above; that notation
+does not mean raw concatenation without the length fields.
+
+The v1 domains are `populus/node/v1`, `populus/client/v1`,
+`populus/routing/v1`, `populus/producer/v1`, `populus/authority/v1`, and
+`populus/mutable/v1`. `NodeId` and `ClientId` hash the same canonical
+`NetworkIdentity` encoding under separate domains (ID-001). `RoutingKey` accepts
+typed logical identifiers only: kind `0x01` followed by the 36-byte v1 `ContentId`,
+or kind `0x02` followed by the 32-byte `MutableContentId`.
+
+The v1 `ContentId` profile is exactly 36 bytes:
+`0x01 || 0x71 || 0x12 || 0x20 || digest[32]` (CIDv1, dag-cbor codec, sha2-256
+multihash). Other versions, codecs, hash codes, digest lengths, and trailing bytes
+are invalid. This restricted profile is intentionally implemented without CID
+helper crates; Phase 3 may widen it if the content model requires additional
+profiles.
+
+`ProducerId` and `AuthorityId` use algorithm tag `0x01` for Ed25519 and require a
+32-byte public key. An `AuthorityId` uses the separate `populus/authority/v1`
+domain, so the same key never has the same derived identifier as its `ProducerId`.
+This authority-key identity choice is a design decision requiring maintainer review.
+
+`MutableContentId` uses the genesis `ContentId` as its payload. This stable
+self-certifying identifier choice is also a design decision requiring maintainer
+review.
+
+`Epoch` is an opaque unsigned 64-bit protocol value. Its wire representation is
+exactly eight bytes in big-endian order; it has no wall-clock interpretation.
 
 ---
 
