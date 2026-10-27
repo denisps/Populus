@@ -185,6 +185,12 @@ fixed_id!(
 /// The wire form is exactly `0x01 || 0x71 || 0x12 || 0x20 || digest[32]` (36 bytes).
 /// It is stable for the addressed immutable object; only this codec and hash profile
 /// are accepted in v1. Phase 3 may widen the profile as a versioned protocol change.
+///
+/// ```compile_fail
+/// use populus_types::{ContentId, MutableContentId};
+/// let content = ContentId::from_digest([0; 32]);
+/// let _: MutableContentId = content;
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContentId([u8; 36]);
 
@@ -800,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn ipv4_and_mapped_ipv4_apply_the_same_eligibility_policy() {
+    fn ipv4_and_mapped_ipv4_apply_the_same_eligibility_policy_id_002() {
         let rejected = [
             ("10.0.0.1", NetworkIdentityError::Ipv4Private),
             ("172.16.0.1", NetworkIdentityError::Ipv4Private),
@@ -844,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn six_to_four_applies_ipv4_eligibility_before_ipv6_policy() {
+    fn six_to_four_applies_ipv4_eligibility_before_ipv6_policy_id_002() {
         let public = Ipv6Addr::new(0x2002, 0x0808, 0x0808, 0, 0, 0, 0, 1);
         let native = NetworkIdentity::from_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
         assert!(native.is_ok());
@@ -862,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_exclusion_classes_are_rejected_after_transition_classification() {
+    fn ipv6_exclusion_classes_are_rejected_after_transition_classification_id_002() {
         let rejected = [
             ("::", NetworkIdentityError::Ipv6Unspecified),
             ("::1", NetworkIdentityError::Ipv6Loopback),
@@ -888,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_prefix_normalization_and_family_separation() {
+    fn ipv6_prefix_normalization_and_family_separation_id_002() {
         let first = NetworkIdentity::from_ip(IpAddr::V6(
             Ipv6Addr::from_str("2001:4860:1234:abcd::1").unwrap_or(Ipv6Addr::UNSPECIFIED),
         ));

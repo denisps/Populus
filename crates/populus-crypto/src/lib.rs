@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn network_vectors_check_normalization_and_both_hash_domains() {
+    fn network_vectors_check_normalization_and_both_hash_domains_id_002() {
         let vectors = vector_file();
         let entries = required_array(&vectors, "network_identities");
         assert_ne!(entries.len(), 0);
@@ -391,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn mapped_and_six_to_four_forms_preserve_derived_identity() {
+    fn mapped_and_six_to_four_forms_preserve_derived_identity_id_002() {
         let native = NetworkIdentity::from_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
         let mapped =
             NetworkIdentity::from_ip(IpAddr::V6(Ipv4Addr::new(8, 8, 8, 8).to_ipv6_mapped()));
@@ -469,7 +469,9 @@ mod tests {
         })]
 
         #[test]
-        fn same_normalized_input_has_stable_domain_outputs(bytes in any::<[u8; 4]>()) {
+        fn same_normalized_input_has_distinct_node_client_domains_id_001(
+            bytes in any::<[u8; 4]>()
+        ) {
             let address = Ipv4Addr::new(8, bytes[0], bytes[1], bytes[2]);
             let identity = NetworkIdentity::from_ip(IpAddr::V4(address));
             prop_assert!(identity.is_ok());

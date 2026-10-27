@@ -3,9 +3,21 @@ name = "populus-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
+license = "MIT"
 
 [package.metadata]
 cargo-fuzz = true
 
+[dependencies]
+libfuzzer-sys = "0.4.13"
+populus-types = { version = "0.1.0", path = "../crates/populus-types" }
+
 [lib]
 path = "src/lib.rs"
+
+[[bin]]
+name = "id_parsers"
+path = "fuzz_targets/id_parsers.rs"
+test = false
+doc = false
+bench = false
