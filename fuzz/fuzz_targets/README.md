@@ -1,3 +1,4 @@
 # Fuzz targets
 
-No decoder targets exist before protocol implementation. Add one harness per untrusted decoder.
+`id_parsers.rs` exercises the Phase 1 identifier and canonical encoding parsers.
+Add focused harnesses for later untrusted decoder families as those phases land.

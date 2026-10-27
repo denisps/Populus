@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dev-dependencies]
+proptest = "1.6.0"
+
 [lints]
 workspace = true
