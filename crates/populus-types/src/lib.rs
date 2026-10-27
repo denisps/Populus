@@ -25,10 +25,16 @@ impl fmt::Display for IdParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WrongLength { expected, actual } => {
-                write!(formatter, "expected {expected} bytes or hex characters, got {actual}")
+                write!(
+                    formatter,
+                    "expected {expected} bytes or hex characters, got {actual}"
+                )
             }
             Self::InvalidHex { index } => {
-                write!(formatter, "invalid lowercase hexadecimal character at byte {index}")
+                write!(
+                    formatter,
+                    "invalid lowercase hexadecimal character at byte {index}"
+                )
             }
         }
     }
@@ -45,11 +51,8 @@ fn parse_hex<const N: usize>(text: &str) -> Result<[u8; N], IdParseError> {
     }
 
     let mut result = [0; N];
-    for (index, (destination, pair)) in result
-        .iter_mut()
-        .zip(text.as_bytes().chunks_exact(2))
-        .enumerate()
-    {
+    let (pairs, _) = text.as_bytes().as_chunks::<2>();
+    for (index, (destination, pair)) in result.iter_mut().zip(pairs).enumerate() {
         let Some((&high, &low)) = pair.first().zip(pair.get(1)) else {
             return Err(IdParseError::InvalidHex {
                 index: index.saturating_mul(2),
@@ -143,32 +146,45 @@ macro_rules! fixed_id {
 
 fixed_id!(
     NodeId,
-    "A `NodeId` is the v1 scarce-network-derived position of a node in Populus XOR routing."
+    "A `NodeId` is the v1 scarce-network-derived position of a node in Populus XOR routing. \
+     It is exactly 32 bytes and remains associated with the normalized address resource; \
+     it does not authenticate a transport peer or conceal enumerable IP inputs."
 );
 fixed_id!(
     ClientId,
-    "A `ClientId` is the v1 scarce-network-derived voting and deduplication identity."
+    "A `ClientId` is the v1 scarce-network-derived voting and deduplication identity. \
+     It is exactly 32 bytes and persists for the normalized scarcity resource under v1; \
+     hashing is not anonymization and the IPv4 source space is enumerable."
 );
 fixed_id!(
     ProducerId,
-    "A `ProducerId` identifies a cryptographic content producer, independently of network identity."
+    "A `ProducerId` identifies an Ed25519 public key for authorship, independently of \
+     network identity. It is exactly 32 bytes and remains stable for that key under v1; \
+     the identifier does not itself prove a signature."
 );
 fixed_id!(
     AuthorityId,
-    "An `AuthorityId` identifies an authority signing key under its own versioned hash domain."
+    "An `AuthorityId` identifies an authority Ed25519 signing key under its own v1 \
+     hash domain. It is exactly 32 bytes and remains stable for that key; the ID is \
+     identity, not proof that the key is trusted."
 );
 fixed_id!(
     MutableContentId,
-    "A `MutableContentId` is the stable v1 identity derived from a mutable object's genesis CID."
+    "A `MutableContentId` is the stable v1 identity derived from a mutable object's \
+     36-byte genesis CID. It is exactly 32 bytes and lasts for the object's lifetime; \
+     later revision CIDs do not change it."
 );
 fixed_id!(
     RoutingKey,
-    "A `RoutingKey` is a uniformly distributed 32-byte key used for Populus XOR routing."
+    "A `RoutingKey` is a v1 domain-separated hash of a typed logical identifier. \
+     It is exactly 32 bytes and is used only as a fixed-width Populus XOR target."
 );
 
-/// A v1 immutable content identifier using the restricted CIDv1 dag-cbor/sha2-256 profile.
+/// A v1 immutable content identifier using the restricted `CIDv1` `dag-cbor`/`sha2-256` profile.
 ///
-/// The wire form is exactly `0x01 || 0x71 || 0x12 || 0x20 || digest[32]`.
+/// The wire form is exactly `0x01 || 0x71 || 0x12 || 0x20 || digest[32]` (36 bytes).
+/// It is stable for the addressed immutable object; only this codec and hash profile
+/// are accepted in v1. Phase 3 may widen the profile as a versioned protocol change.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContentId([u8; 36]);
 
@@ -195,11 +211,17 @@ impl fmt::Display for ContentIdParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WrongLength { expected, actual } => {
-                write!(formatter, "expected {expected} bytes or hex characters, got {actual}")
+                write!(
+                    formatter,
+                    "expected {expected} bytes or hex characters, got {actual}"
+                )
             }
             Self::InvalidProfile => formatter.write_str("unsupported ContentId profile"),
             Self::InvalidHex { index } => {
-                write!(formatter, "invalid lowercase hexadecimal character at byte {index}")
+                write!(
+                    formatter,
+                    "invalid lowercase hexadecimal character at byte {index}"
+                )
             }
         }
     }
@@ -225,6 +247,11 @@ impl ContentId {
     }
 
     /// Parses a complete 36-byte CID, rejecting unsupported profiles and trailing bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContentIdParseError::InvalidProfile`] when the prefix is not the
+    /// v1 dag-cbor/sha2-256 profile.
     pub fn from_bytes(bytes: [u8; 36]) -> Result<Self, ContentIdParseError> {
         if bytes[..4] != [0x01, 0x71, 0x12, 0x20] {
             return Err(ContentIdParseError::InvalidProfile);
@@ -307,25 +334,25 @@ pub enum NetworkIdentityError {
     Ipv6Unspecified,
     /// IPv6 address is the loopback address.
     Ipv6Loopback,
-    /// IPv6 address belongs to fe80::/10.
+    /// IPv6 address belongs to `fe80::/10`.
     Ipv6LinkLocal,
-    /// IPv6 address belongs to ff00::/8.
+    /// IPv6 address belongs to `ff00::/8`.
     Ipv6Multicast,
-    /// IPv6 address belongs to fc00::/7.
+    /// IPv6 address belongs to `fc00::/7`.
     Ipv6UniqueLocal,
-    /// IPv6 address belongs to 2001:db8::/32.
+    /// IPv6 address belongs to `2001:db8::/32`.
     Ipv6Documentation,
-    /// IPv6 address belongs to fec0::/10.
+    /// IPv6 address belongs to `fec0::/10`.
     Ipv6SiteLocal,
-    /// IPv6 address belongs to 100::/64.
+    /// IPv6 address belongs to `100::/64`.
     Ipv6Discard,
-    /// IPv6 address belongs to the deprecated 2001::/32 Teredo range.
+    /// IPv6 address belongs to the deprecated `2001::/32` Teredo range.
     Ipv6Teredo,
     /// IPv6 address belongs to one of the specified NAT64 ranges.
     Ipv6Nat64,
-    /// IPv6 address belongs to the deprecated IPv4-compatible ::/96 range.
+    /// IPv6 address belongs to the deprecated IPv4-compatible `::/96` range.
     Ipv4Compatible,
-    /// Ordinary IPv6 address is outside the v1 global-unicast 2000::/3 range.
+    /// Ordinary IPv6 address is outside the v1 global-unicast `2000::/3` range.
     Ipv6NotGlobalUnicast,
 }
 
@@ -363,7 +390,9 @@ impl std::error::Error for NetworkIdentityError {}
 ///
 /// IPv4 identities encode as `0x04 || address[4]`; ordinary IPv6 identities encode
 /// as `0x06 || /48-prefix[6]`. Mapped and 6to4 IPv6 forms are classified as IPv4
-/// before IPv6 eligibility is checked (ID-002).
+/// before IPv6 eligibility is checked (ID-002). It exists for the lifetime of the
+/// normalized public address resource under v1; over-merging is intentional, and
+/// the encoding/hash is not a privacy boundary.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetworkIdentity {
     encoded: [u8; 7],
@@ -401,8 +430,12 @@ impl NetworkIdentity {
     ///
     /// IPv4-mapped and 6to4 forms are converted to their embedded IPv4 scarcity
     /// resource first, then checked using native IPv4 eligibility rules. All other
-    /// IPv6 addresses must be eligible global unicast in 2000::/3 and are reduced
+    /// IPv6 addresses must be eligible global unicast in `2000::/3` and are reduced
     /// to their /48. The function is pure and performs no network lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns the precise IPv4 or IPv6 eligibility rejection class.
     pub fn from_ip(address: IpAddr) -> Result<Self, NetworkIdentityError> {
         let normalize_v4 = |address: Ipv4Addr| -> Result<Self, NetworkIdentityError> {
             let [first, second, third, _] = address.octets();
@@ -450,9 +483,7 @@ impl NetworkIdentity {
 
                 let octets = address.octets();
                 if octets[0] == 0x20 && octets[1] == 0x02 {
-                    return normalize_v4(Ipv4Addr::new(
-                        octets[2], octets[3], octets[4], octets[5],
-                    ));
+                    return normalize_v4(Ipv4Addr::new(octets[2], octets[3], octets[4], octets[5]));
                 }
 
                 let segments = address.segments();
@@ -504,6 +535,11 @@ impl NetworkIdentity {
     }
 
     /// Parses a canonical family-tagged encoding and revalidates its v1 eligibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkIdentityParseError`] for malformed, ineligible, or
+    /// non-canonical encodings.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, NetworkIdentityParseError> {
         match (bytes.first(), bytes.len()) {
             (Some(0x04), 5) => {
@@ -521,9 +557,8 @@ impl NetworkIdentity {
                 }
                 Ok(normalized)
             }
-            (Some(0x04) | Some(0x06), _) => Err(NetworkIdentityParseError::WrongLength),
+            (Some(0x04 | 0x06) | None, _) => Err(NetworkIdentityParseError::WrongLength),
             (Some(_), _) => Err(NetworkIdentityParseError::InvalidFamilyTag),
-            (None, _) => Err(NetworkIdentityParseError::WrongLength),
         }
     }
 }
@@ -536,11 +571,12 @@ impl TryFrom<&[u8]> for NetworkIdentity {
     }
 }
 
-/// Big-endian XOR distance between routing identifiers.
+/// Big-endian 256-bit XOR distance between routing identifiers.
 ///
 /// Distances may be computed between a `NodeId` and either a `RoutingKey` or
 /// another `NodeId`; these are the two protocol-defined routing comparisons.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Ordering is unsigned big-endian numeric ordering and leading-zero counts use bits.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct XorDistance([u8; 32]);
 
 impl XorDistance {
@@ -584,17 +620,15 @@ impl XorDistance {
             if byte == 0 {
                 count += 8;
             } else {
-                count += u16::try_from(byte.leading_zeros()).unwrap_or(0);
+                let mut mask = 0x80;
+                while byte & mask == 0 {
+                    count += 1;
+                    mask >>= 1;
+                }
                 break;
             }
         }
         count
-    }
-}
-
-impl Default for XorDistance {
-    fn default() -> Self {
-        Self([0; 32])
     }
 }
 
@@ -625,6 +659,7 @@ impl Epoch {
     }
 
     /// Parses exactly eight bytes of big-endian epoch encoding.
+    #[must_use]
     pub fn from_bytes(bytes: [u8; 8]) -> Self {
         Self(u64::from_be_bytes(bytes))
     }
@@ -650,8 +685,8 @@ impl TryFrom<&[u8]> for Epoch {
 mod tests {
     use super::{
         AuthorityId, ClientId, ContentId, ContentIdParseError, Epoch, IdParseError,
-        MutableContentId, NetworkIdentity, NetworkIdentityError, NetworkIdentityParseError,
-        NodeId, ProducerId, RoutingKey, XorDistance,
+        MutableContentId, NetworkIdentity, NetworkIdentityError, NetworkIdentityParseError, NodeId,
+        ProducerId, RoutingKey, XorDistance,
     };
     use proptest::prelude::*;
     use proptest::test_runner::{Config as ProptestConfig, RngSeed};
@@ -671,7 +706,13 @@ mod tests {
         ];
         assert!(ids.iter().all(|text| text == &"ab".repeat(32)));
         assert!(NodeId::from_str(&ids[0]).is_ok_and(|id| id.as_bytes() == &bytes));
+        assert!(ClientId::from_str(&ids[1]).is_ok_and(|id| id.as_bytes() == &bytes));
+        assert!(ProducerId::from_str(&ids[2]).is_ok_and(|id| id.as_bytes() == &bytes));
+        assert!(AuthorityId::from_str(&ids[3]).is_ok_and(|id| id.as_bytes() == &bytes));
+        assert!(MutableContentId::from_str(&ids[4]).is_ok_and(|id| id.as_bytes() == &bytes));
+        assert!(RoutingKey::from_str(&ids[5]).is_ok_and(|id| id.as_bytes() == &bytes));
         assert!(ClientId::try_from(bytes.as_slice()).is_ok_and(|id| id.as_bytes() == &bytes));
+        assert!(ClientId::try_from(&bytes[..31]).is_err());
         assert!(ProducerId::try_from(&bytes[..31]).is_err());
         assert!(AuthorityId::try_from(&bytes[..31]).is_err());
         assert!(MutableContentId::try_from(&bytes[..31]).is_err());
@@ -714,7 +755,7 @@ mod tests {
     #[test]
     fn epoch_is_big_endian_and_opaque() {
         let epoch = Epoch::new(0x0102_0304_0506_0708);
-        assert!(epoch.to_bytes() == [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(epoch.to_bytes(), [1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(Epoch::try_from(epoch.to_bytes().as_slice()).is_ok_and(|decoded| decoded == epoch));
         assert!(Epoch::try_from(&[0; 7][..]).is_err());
         assert!(Epoch::new(2) < Epoch::new(3));
@@ -725,8 +766,11 @@ mod tests {
         let ipv4 = NetworkIdentity::from_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
         assert!(ipv4.is_ok());
         if let Ok(identity) = ipv4 {
-            assert!(identity.as_bytes() == [0x04, 8, 8, 8, 8]);
-            assert!(NetworkIdentity::from_bytes(identity.as_bytes()).is_ok_and(|decoded| decoded == identity));
+            assert_eq!(identity.as_bytes(), [0x04, 8, 8, 8, 8]);
+            assert!(
+                NetworkIdentity::from_bytes(identity.as_bytes())
+                    .is_ok_and(|decoded| decoded == identity)
+            );
         }
 
         let ipv6 = NetworkIdentity::from_ip(IpAddr::V6(
@@ -734,8 +778,14 @@ mod tests {
         ));
         assert!(ipv6.is_ok());
         if let Ok(identity) = ipv6 {
-            assert!(identity.as_bytes() == [0x06, 0x20, 0x01, 0x48, 0x60, 0x12, 0x34]);
-            assert!(NetworkIdentity::from_bytes(identity.as_bytes()).is_ok_and(|decoded| decoded == identity));
+            assert_eq!(
+                identity.as_bytes(),
+                [0x06, 0x20, 0x01, 0x48, 0x60, 0x12, 0x34]
+            );
+            assert!(
+                NetworkIdentity::from_bytes(identity.as_bytes())
+                    .is_ok_and(|decoded| decoded == identity)
+            );
         }
         assert!(matches!(
             NetworkIdentity::from_bytes(&[0x06, 0x10, 0, 0, 0, 0, 0]),
@@ -777,16 +827,19 @@ mod tests {
         }
 
         let loopback = Ipv4Addr::LOCALHOST.to_ipv6_mapped();
-        assert!(NetworkIdentity::from_ip(IpAddr::V6(loopback))
-            == Err(NetworkIdentityError::Ipv4Loopback));
+        assert!(
+            NetworkIdentity::from_ip(IpAddr::V6(loopback))
+                == Err(NetworkIdentityError::Ipv4Loopback)
+        );
         let documentation = Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped();
-        assert!(NetworkIdentity::from_ip(IpAddr::V6(documentation))
-            == Err(NetworkIdentityError::Ipv4Documentation));
+        assert!(
+            NetworkIdentity::from_ip(IpAddr::V6(documentation))
+                == Err(NetworkIdentityError::Ipv4Documentation)
+        );
 
         let native = NetworkIdentity::from_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
-        let mapped = NetworkIdentity::from_ip(IpAddr::V6(
-            Ipv4Addr::new(8, 8, 8, 8).to_ipv6_mapped(),
-        ));
+        let mapped =
+            NetworkIdentity::from_ip(IpAddr::V6(Ipv4Addr::new(8, 8, 8, 8).to_ipv6_mapped()));
         assert!(native.is_ok() && native == mapped);
     }
 
@@ -798,11 +851,14 @@ mod tests {
         assert!(NetworkIdentity::from_ip(IpAddr::V6(public)) == native);
 
         let private = Ipv6Addr::new(0x2002, 0x0a00, 0x0001, 0, 0, 0, 0, 1);
-        assert!(NetworkIdentity::from_ip(IpAddr::V6(private))
-            == Err(NetworkIdentityError::Ipv4Private));
+        assert!(
+            NetworkIdentity::from_ip(IpAddr::V6(private)) == Err(NetworkIdentityError::Ipv4Private)
+        );
         let documentation = Ipv6Addr::new(0x2002, 0xc000, 0x0201, 0, 0, 0, 0, 1);
-        assert!(NetworkIdentity::from_ip(IpAddr::V6(documentation))
-            == Err(NetworkIdentityError::Ipv4Documentation));
+        assert!(
+            NetworkIdentity::from_ip(IpAddr::V6(documentation))
+                == Err(NetworkIdentityError::Ipv4Documentation)
+        );
     }
 
     #[test]
@@ -833,35 +889,37 @@ mod tests {
 
     #[test]
     fn ipv6_prefix_normalization_and_family_separation() {
-        let first = NetworkIdentity::from_ip(IpAddr::V6(Ipv6Addr::from_str(
-            "2001:4860:1234:abcd::1",
-        ).unwrap_or(Ipv6Addr::UNSPECIFIED)));
-        let same_prefix = NetworkIdentity::from_ip(IpAddr::V6(Ipv6Addr::from_str(
-            "2001:4860:1234:ffff::1234",
-        ).unwrap_or(Ipv6Addr::UNSPECIFIED)));
-        let adjacent = NetworkIdentity::from_ip(IpAddr::V6(Ipv6Addr::from_str(
-            "2001:4860:1235::1",
-        ).unwrap_or(Ipv6Addr::UNSPECIFIED)));
+        let first = NetworkIdentity::from_ip(IpAddr::V6(
+            Ipv6Addr::from_str("2001:4860:1234:abcd::1").unwrap_or(Ipv6Addr::UNSPECIFIED),
+        ));
+        let same_prefix = NetworkIdentity::from_ip(IpAddr::V6(
+            Ipv6Addr::from_str("2001:4860:1234:ffff::1234").unwrap_or(Ipv6Addr::UNSPECIFIED),
+        ));
+        let adjacent = NetworkIdentity::from_ip(IpAddr::V6(
+            Ipv6Addr::from_str("2001:4860:1235::1").unwrap_or(Ipv6Addr::UNSPECIFIED),
+        ));
         assert!(first.is_ok() && first == same_prefix);
         assert!(first.is_ok() && first != adjacent);
 
         let ipv4 = NetworkIdentity::from_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
-        let ipv6 = NetworkIdentity::from_ip(IpAddr::V6(Ipv6Addr::from_str(
-            "2001:4860::1",
-        ).unwrap_or(Ipv6Addr::UNSPECIFIED)));
-        assert!(ipv4.is_ok() && ipv6.is_ok() && ipv4 != ipv6);
-        assert!(matches!(
-            NetworkIdentity::from_ip(IpAddr::V6(Ipv6Addr::from_str("2001:4860::1").unwrap_or(Ipv6Addr::UNSPECIFIED))),
-            Ok(_)
+        let ipv6 = NetworkIdentity::from_ip(IpAddr::V6(
+            Ipv6Addr::from_str("2001:4860::1").unwrap_or(Ipv6Addr::UNSPECIFIED),
         ));
+        assert!(ipv4.is_ok() && ipv6.is_ok() && ipv4 != ipv6);
+        assert!(
+            NetworkIdentity::from_ip(IpAddr::V6(
+                Ipv6Addr::from_str("2001:4860::1").unwrap_or(Ipv6Addr::UNSPECIFIED)
+            ))
+            .is_ok()
+        );
     }
 
     #[test]
     fn xor_distance_has_big_endian_order_and_prefix_count() {
         let zero = NodeId::from_bytes([0; 32]);
         let same = XorDistance::between_nodes(&zero, &zero);
-        assert!(same.as_bytes() == &[0; 32]);
-        assert!(same.leading_zero_bits() == 256);
+        assert_eq!(same.as_bytes(), &[0; 32]);
+        assert_eq!(same.leading_zero_bits(), 256);
 
         let mut far_bytes = [0; 32];
         far_bytes[0] = 0x80;
@@ -870,9 +928,12 @@ mod tests {
         let far = XorDistance::between_nodes(&zero, &NodeId::from_bytes(far_bytes));
         let near = XorDistance::between_nodes(&zero, &NodeId::from_bytes(near_bytes));
         assert!(near < far);
-        assert!(near.leading_zero_bits() == 1);
+        assert_eq!(near.leading_zero_bits(), 1);
         let key = RoutingKey::from_bytes(near_bytes);
-        assert!(XorDistance::between_node_and_key(&zero, &key).as_bytes() == near.as_bytes());
+        assert_eq!(
+            XorDistance::between_node_and_key(&zero, &key).as_bytes(),
+            near.as_bytes()
+        );
     }
 
     proptest! {
@@ -908,16 +969,46 @@ mod tests {
             prop_assert!(NodeId::try_from(id.as_bytes().as_slice()).is_ok_and(|parsed| parsed == id));
             let client = ClientId::from_bytes(bytes);
             prop_assert!(ClientId::try_from(client.as_bytes().as_slice()).is_ok_and(|parsed| parsed == client));
+            let producer = ProducerId::from_bytes(bytes);
+            prop_assert!(ProducerId::try_from(producer.as_bytes().as_slice()).is_ok_and(|parsed| parsed == producer));
+            let authority = AuthorityId::from_bytes(bytes);
+            prop_assert!(AuthorityId::try_from(authority.as_bytes().as_slice()).is_ok_and(|parsed| parsed == authority));
+            let mutable = MutableContentId::from_bytes(bytes);
+            prop_assert!(MutableContentId::try_from(mutable.as_bytes().as_slice()).is_ok_and(|parsed| parsed == mutable));
+            let routing = RoutingKey::from_bytes(bytes);
+            prop_assert!(RoutingKey::try_from(routing.as_bytes().as_slice()).is_ok_and(|parsed| parsed == routing));
+        }
+
+        #[test]
+        fn arbitrary_content_digest_and_epoch_round_trip(
+            digest in any::<[u8; 32]>(),
+            value in any::<u64>(),
+        ) {
+            let cid = ContentId::from_digest(digest);
+            prop_assert!(ContentId::try_from(cid.as_bytes().as_slice()).is_ok_and(|parsed| parsed == cid));
+            prop_assert!(ContentId::from_str(&cid.to_string()).is_ok_and(|parsed| parsed == cid));
+            let epoch = Epoch::new(value);
+            prop_assert!(Epoch::try_from(epoch.to_bytes().as_slice()).is_ok_and(|parsed| parsed == epoch));
         }
 
         #[test]
         fn arbitrary_parser_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..=80)) {
             let _ = NodeId::try_from(bytes.as_slice());
+            let _ = ClientId::try_from(bytes.as_slice());
+            let _ = ProducerId::try_from(bytes.as_slice());
+            let _ = AuthorityId::try_from(bytes.as_slice());
+            let _ = MutableContentId::try_from(bytes.as_slice());
+            let _ = RoutingKey::try_from(bytes.as_slice());
             let _ = ContentId::try_from(bytes.as_slice());
             let _ = NetworkIdentity::try_from(bytes.as_slice());
             let _ = Epoch::try_from(bytes.as_slice());
             let text = String::from_utf8_lossy(&bytes);
             let _ = NodeId::from_str(&text);
+            let _ = ClientId::from_str(&text);
+            let _ = ProducerId::from_str(&text);
+            let _ = AuthorityId::from_str(&text);
+            let _ = MutableContentId::from_str(&text);
+            let _ = RoutingKey::from_str(&text);
             let _ = ContentId::from_str(&text);
         }
     }

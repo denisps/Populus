@@ -1,0 +1,192 @@
+{
+  "schema": "populus-identifiers-v1",
+  "network_identities": [
+    {
+      "input": "8.8.8.8",
+      "encoding": "0408080808",
+      "node_id": "c3a9efa00a0266221ec1ffd1030a91b167cabf3d2d7b89c089aa1bc385b878db",
+      "client_id": "818d1632542d5cd27cfee9c0f0272284a02d618bbbe21a478bd51f466b7f92f9"
+    },
+    {
+      "input": "::ffff:8.8.8.8",
+      "encoding": "0408080808",
+      "node_id": "c3a9efa00a0266221ec1ffd1030a91b167cabf3d2d7b89c089aa1bc385b878db",
+      "client_id": "818d1632542d5cd27cfee9c0f0272284a02d618bbbe21a478bd51f466b7f92f9"
+    },
+    {
+      "input": "2002:808:808::1",
+      "encoding": "0408080808",
+      "node_id": "c3a9efa00a0266221ec1ffd1030a91b167cabf3d2d7b89c089aa1bc385b878db",
+      "client_id": "818d1632542d5cd27cfee9c0f0272284a02d618bbbe21a478bd51f466b7f92f9"
+    },
+    {
+      "input": "10.0.0.1",
+      "rejection": "ipv4_private"
+    },
+    {
+      "input": "172.16.0.1",
+      "rejection": "ipv4_private"
+    },
+    {
+      "input": "192.168.0.1",
+      "rejection": "ipv4_private"
+    },
+    {
+      "input": "127.0.0.1",
+      "rejection": "ipv4_loopback"
+    },
+    {
+      "input": "169.254.1.1",
+      "rejection": "ipv4_link_local"
+    },
+    {
+      "input": "100.64.0.1",
+      "rejection": "ipv4_carrier_grade_nat"
+    },
+    {
+      "input": "224.0.0.1",
+      "rejection": "ipv4_multicast"
+    },
+    {
+      "input": "240.0.0.1",
+      "rejection": "ipv4_reserved"
+    },
+    {
+      "input": "255.255.255.255",
+      "rejection": "ipv4_reserved"
+    },
+    {
+      "input": "0.1.2.3",
+      "rejection": "ipv4_unspecified"
+    },
+    {
+      "input": "192.0.2.1",
+      "rejection": "ipv4_documentation"
+    },
+    {
+      "input": "198.51.100.1",
+      "rejection": "ipv4_documentation"
+    },
+    {
+      "input": "203.0.113.1",
+      "rejection": "ipv4_documentation"
+    },
+    {
+      "input": "::ffff:10.0.0.1",
+      "rejection": "ipv4_private"
+    },
+    {
+      "input": "::ffff:127.0.0.1",
+      "rejection": "ipv4_loopback"
+    },
+    {
+      "input": "::ffff:192.0.2.1",
+      "rejection": "ipv4_documentation"
+    },
+    {
+      "input": "2002:a00:1::1",
+      "rejection": "ipv4_private"
+    },
+    {
+      "input": "2002:c000:201::1",
+      "rejection": "ipv4_documentation"
+    },
+    {
+      "input": "2001:4860:1234:abcd::1",
+      "encoding": "06200148601234",
+      "node_id": "31d29cf2d31c83e0bef2904d4c82ab137ad55a6ee750c90dd63f6a31df4d6f09",
+      "client_id": "bfa5f3f5281c4bceaf1ea75f3fa94fd79232950962ec77c9541c53bec240d81c"
+    },
+    {
+      "input": "2001:4860:1234:ffff::1234",
+      "encoding": "06200148601234",
+      "node_id": "31d29cf2d31c83e0bef2904d4c82ab137ad55a6ee750c90dd63f6a31df4d6f09",
+      "client_id": "bfa5f3f5281c4bceaf1ea75f3fa94fd79232950962ec77c9541c53bec240d81c"
+    },
+    {
+      "input": "2001:4860:1235::1",
+      "encoding": "06200148601235",
+      "node_id": "d6fc53d6553f4f7787f0ed41edb2960d8b0a8ed2f58e5cd98b129972fc29ed62",
+      "client_id": "4f100b5bc460bf5f03d9136b20ff550d76e4fd125aba9d9ad7c8fca0c010e258"
+    },
+    {
+      "input": "::",
+      "rejection": "ipv6_unspecified"
+    },
+    {
+      "input": "::1",
+      "rejection": "ipv6_loopback"
+    },
+    {
+      "input": "fe80::1",
+      "rejection": "ipv6_link_local"
+    },
+    {
+      "input": "ff02::1",
+      "rejection": "ipv6_multicast"
+    },
+    {
+      "input": "fc00::1",
+      "rejection": "ipv6_unique_local"
+    },
+    {
+      "input": "2001:db8::1",
+      "rejection": "ipv6_documentation"
+    },
+    {
+      "input": "fec0::1",
+      "rejection": "ipv6_site_local"
+    },
+    {
+      "input": "100::1",
+      "rejection": "ipv6_discard"
+    },
+    {
+      "input": "2001::1",
+      "rejection": "ipv6_teredo"
+    },
+    {
+      "input": "64:ff9b::808:808",
+      "rejection": "ipv6_nat64"
+    },
+    {
+      "input": "64:ff9b:1::1",
+      "rejection": "ipv6_nat64"
+    },
+    {
+      "input": "::8.8.8.8",
+      "rejection": "ipv4_compatible"
+    },
+    {
+      "input": "1000::1",
+      "rejection": "ipv6_not_global_unicast"
+    }
+  ],
+  "content_id": {
+    "digest": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "cid": "01711220000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+  },
+  "mutable_content": {
+    "genesis_cid": "01711220000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "mutable_id": "baab67c347de1318c518f574d8c7c90cb761abe390ec50dc51b79024d0cf3684"
+  },
+  "routing_keys": [
+    {
+      "kind": "content",
+      "identifier": "01711220000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "routing_key": "1088c339434188a81fb80927b84c1acfdf659d4e1d2b6ae1c17253537b0649e4"
+    },
+    {
+      "kind": "mutable_content",
+      "identifier": "baab67c347de1318c518f574d8c7c90cb761abe390ec50dc51b79024d0cf3684",
+      "routing_key": "3003f3f9005ce367c12bb7fbdfaf58db610d063a7619eba25e86785688f053eb"
+    }
+  ],
+  "public_key": {
+    "algorithm": "ed25519",
+    "tag": "01",
+    "bytes": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "producer_id": "8f01692cb4052dd22ffbc63f6c98d22228502b2bb630c6cb1c7ca87d94962815",
+    "authority_id": "a3c17a474d08826d9e753b406b2a7adb628b4db623a3f424ddf3c95baf8fa8c0"
+  }
+}

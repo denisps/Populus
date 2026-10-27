@@ -262,15 +262,17 @@ That does not grant additional ClientIds for popularity voting.
 
 Immutable content is content-addressed.
 
-The preferred initial design uses:
+The Phase 1 `ContentId` parser accepts this restricted profile only:
 
 ```text
 CIDv1
-multihash
-DAG-CBOR or another deterministic canonical codec
+dag-cbor codec (0x71)
+sha2-256 multihash (0x12, 32-byte digest)
+exactly 36 bytes, with no trailing data
 ```
 
-The complete object may be anonymous or signed.
+The complete object may be anonymous or signed. Phase 3 may widen the profile
+if another deterministic canonical codec or hash is required.
 
 ## 2.7 MutableContentId
 
