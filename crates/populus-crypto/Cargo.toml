@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-populus-types = { path = "../populus-types" }
+populus-types = { version = "0.1.0", path = "../populus-types" }
 sha2.workspace = true
 
 [dev-dependencies]
