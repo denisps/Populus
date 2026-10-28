@@ -11,6 +11,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 
 [licenses]
+unused-allowed-license = "allow"
 confidence-threshold = 0.93
 allow = [
     "Apache-2.0",
