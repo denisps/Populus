@@ -637,7 +637,12 @@ Authorities may track intra-day trends.
 
 HLL estimates distinct ClientIds using fixed memory.
 
-Initial likely dense configuration:
+The v1 `populus-sketch` implementation uses an exact sparse representation for
+up to 256 distinct ClientIds, promoting to dense HLL on the next new ID.
+ClientIds are already domain-separated SHA-256 outputs; v1 uses the first 64
+bits, interpreted big-endian, directly for register selection and rank.
+
+Dense configuration:
 
 ```text
 precision p = 14
@@ -647,7 +652,13 @@ registers = 16,384
 ~0.81% nominal relative standard error
 ```
 
-Small populations should use a sparse representation or another compact exact/sparse form.
+The register array is bit-packed. V1 serialization consists of `PHLL`, a
+version byte (`1`), a representation byte (`0` sparse, `1` dense), followed by
+either strictly increasing 32-byte ClientIds or the fixed-length packed
+register array. Decoders reject unsupported versions, noncanonical sparse
+input, invalid register values, and inputs larger than the largest valid
+encoding. Any incompatible encoding or hash/register change requires a new
+format version and compatibility consideration.
 
 HLL properties important to Populus:
 

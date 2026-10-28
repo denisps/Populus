@@ -580,6 +580,15 @@ Test audience relationships such as:
 
 These derived statistics are informational only and must not become security decisions without independent error analysis.
 
+The v1 implementation uses exact sorted ClientIds through 256 entries and
+promotes to a 14-bit-precision HLL with six-bit packed registers. Serialization
+is versioned and canonical; see ARCHITECTURE.md section 12. Its decoder is
+covered by a fuzz target.
+
+Phase 2 completion requires the interface, merge/serialization properties,
+deterministic statistical tests through one million IDs, exact small-set
+comparisons, and bounded decoder behavior to pass.
+
 ---
 
 # 8. Phase 3: immutable and mutable content model

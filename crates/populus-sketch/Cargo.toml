@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+populus-types = { version = "0.1.0", path = "../populus-types" }
+
 [lints]
 workspace = true

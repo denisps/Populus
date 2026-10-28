@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
+populus-sketch = { version = "0.1.0", path = "../crates/populus-sketch" }
 populus-types = { version = "0.1.0", path = "../crates/populus-types" }
 
 [lib]
@@ -18,6 +19,13 @@ path = "src/lib.rs"
 [[bin]]
 name = "id_parsers"
 path = "fuzz_targets/id_parsers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sketch_decoder"
+path = "fuzz_targets/sketch_decoder.rs"
 test = false
 doc = false
 bench = false
