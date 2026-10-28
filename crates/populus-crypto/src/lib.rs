@@ -1,5 +1,6 @@
 //! Versioned, domain-separated identifier derivations for Populus.
 
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use populus_types::{
     AuthorityId, ClientId, ContentId, MutableContentId, NetworkIdentity, NodeId, ProducerId,
     RoutingKey,
@@ -106,6 +107,10 @@ pub enum CryptoError {
         /// Supplied public-key byte length.
         actual: usize,
     },
+    /// The Ed25519 public key is not a valid curve point.
+    InvalidPublicKey,
+    /// The Ed25519 signature does not verify for the supplied message.
+    InvalidSignature,
 }
 
 impl fmt::Display for CryptoError {
@@ -117,11 +122,71 @@ impl fmt::Display for CryptoError {
                     "expected {expected}-byte public key, got {actual} bytes"
                 )
             }
+            Self::InvalidPublicKey => formatter.write_str("invalid Ed25519 public key"),
+            Self::InvalidSignature => formatter.write_str("invalid Ed25519 signature"),
         }
     }
 }
 
 impl std::error::Error for CryptoError {}
+
+/// Ed25519 signing key for content authorship.
+///
+/// The underlying key value is kept private and is zeroized on drop with the
+/// enabled zeroization feature. The caller must protect the input seed.
+pub struct ProducerKeypair {
+    signing_key: SigningKey,
+}
+
+impl ProducerKeypair {
+    /// Constructs a signing key from its 32-byte Ed25519 secret seed.
+    #[must_use]
+    pub fn from_secret_key(secret: [u8; 32]) -> Self {
+        Self {
+            signing_key: SigningKey::from_bytes(&secret),
+        }
+    }
+
+    /// Returns this key's 32-byte Ed25519 public key.
+    #[must_use]
+    pub fn public_key(&self) -> [u8; 32] {
+        self.signing_key.verifying_key().to_bytes()
+    }
+
+    /// Returns the domain-separated producer identity for this key.
+    #[must_use]
+    pub fn producer_id(&self) -> ProducerId {
+        let public_key = self.public_key();
+        let mut payload = [0; 33];
+        payload[0] = PublicKeyAlgorithm::Ed25519 as u8;
+        payload[1..].copy_from_slice(&public_key);
+        ProducerId::from_bytes(domain_hash(PRODUCER_DOMAIN, &payload))
+    }
+
+    /// Signs an exact message with Ed25519.
+    #[must_use]
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+        self.signing_key.sign(message).to_bytes()
+    }
+}
+
+/// Verifies an Ed25519 signature for an exact message.
+///
+/// # Errors
+///
+/// Returns [`CryptoError::InvalidPublicKey`] for malformed public-key bytes or
+/// [`CryptoError::InvalidSignature`] when verification fails.
+pub fn verify_ed25519(
+    public_key: &[u8; 32],
+    message: &[u8],
+    signature: &[u8; 64],
+) -> Result<(), CryptoError> {
+    let verifying_key =
+        VerifyingKey::from_bytes(public_key).map_err(|_| CryptoError::InvalidPublicKey)?;
+    verifying_key
+        .verify_strict(message, &Signature::from_bytes(signature))
+        .map_err(|_| CryptoError::InvalidSignature)
+}
 
 fn key_payload(algorithm: PublicKeyAlgorithm, public_key: &[u8]) -> Result<[u8; 33], CryptoError> {
     if public_key.len() != 32 {
@@ -174,17 +239,17 @@ pub fn authority_id(
     )))
 }
 
-/// Derives a stable mutable-object identity from its genesis revision CID.
+/// Derives a stable mutable-object identity from its genesis anchor content CID.
 #[must_use]
-pub fn mutable_content_id(genesis_revision: &ContentId) -> MutableContentId {
-    MutableContentId::from_bytes(domain_hash(MUTABLE_DOMAIN, genesis_revision.as_bytes()))
+pub fn mutable_content_id(genesis_anchor: &ContentId) -> MutableContentId {
+    MutableContentId::from_bytes(domain_hash(MUTABLE_DOMAIN, genesis_anchor.as_bytes()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CryptoError, PublicKeyAlgorithm, RoutingIdentifier, authority_id, client_id,
-        mutable_content_id, node_id, producer_id, routing_key,
+        CryptoError, ProducerKeypair, PublicKeyAlgorithm, RoutingIdentifier, authority_id,
+        client_id, mutable_content_id, node_id, producer_id, routing_key, verify_ed25519,
     };
     use populus_types::{ContentId, NetworkIdentity};
     use proptest::prelude::*;
@@ -201,6 +266,22 @@ mod tests {
             Some("populus-identifiers-v1")
         );
         vectors
+    }
+
+    #[test]
+    fn ed25519_signatures_verify_only_for_the_original_message() {
+        let signer = ProducerKeypair::from_secret_key([0x42; 32]);
+        let message = b"canonical body bytes";
+        let signature = signer.sign(message);
+        assert!(verify_ed25519(&signer.public_key(), message, &signature).is_ok());
+        assert_eq!(
+            verify_ed25519(&signer.public_key(), b"modified body bytes", &signature),
+            Err(CryptoError::InvalidSignature)
+        );
+        assert!(
+            producer_id(PublicKeyAlgorithm::Ed25519, &signer.public_key())
+                .is_ok_and(|id| id == signer.producer_id())
+        );
     }
 
     fn required_value<'a>(value: &'a Value, key: &str) -> &'a Value {

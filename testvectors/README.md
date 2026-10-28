@@ -60,3 +60,11 @@ To independently reproduce a vector, normalize the address according to
 ARCHITECTURE.md §2.2, assemble the payload and length fields above, and hash the
 resulting bytes with SHA-256. Expected digests are literal values and are never
 generated at test runtime by the production derivation functions.
+
+## Content vectors v1
+
+`content-v1.json` is the language-independent Phase 3 vector for canonical
+content-body bytes, a complete signed object and CID, and its mutable genesis
+revision. It includes a fixed Ed25519 producer and signature so other
+implementations can verify the signature preimage and complete encoding
+independently.

@@ -286,9 +286,11 @@ immutable RevisionCID for each revision
 
 Each revision links to its predecessor where appropriate.
 
-For v1, `MutableContentId` is the domain-separated hash of the genesis revision's
-`ContentId` bytes under `populus/mutable/v1`. It is stable for the lifetime of the
-mutable object; later revision CIDs do not change it.
+For v1, `MutableContentId` is the domain-separated hash of the genesis anchor
+`ContentId` bytes under `populus/mutable/v1`. The anchor is the complete signed
+immutable content object used to create sequence zero; it is not the CID of the
+revision wrapper, avoiding a circular identifier dependency. The mutable ID is
+stable for the lifetime of the object; later revision CIDs do not change it.
 
 ## 2.8 RoutingKey
 
@@ -348,42 +350,46 @@ exactly eight bytes in big-endian order; it has no wall-clock interpretation.
 
 # 3. Content model
 
-Conceptual immutable content:
+V1 immutable content uses bounded DAG-CBOR positional arrays. Positional fields
+avoid map-key ordering ambiguities; collection fields are set-valued, sorted by
+their encoded identifier bytes, and reject duplicates. Metadata is represented
+as a lexically sorted array of `[UTF-8 key, byte-string value]` pairs. The body
+array is:
 
 ```text
-ContentBody {
-    schema_version
-    created_at
-    media_type
-    payload
-    tags[]
-    associations[]
-    producers[]
-    metadata
-}
+[schema_version, created_at_unix_ms, media_type, payload_bytes,
+ tags[], associations[], producer_ids[], metadata_pairs[]]
 ```
 
-Signed content:
+The schema version is 1. Payloads are limited to 16 MiB, encoded bodies and
+objects to 20 MiB, tags and associations to 256 each, producers to 32, metadata
+to 64 entries, keys to 128 UTF-8 bytes, and values to 64 KiB. Unknown versions
+and over-limit input are rejected before collection allocation.
+
+Signed content is a canonical three-element array:
 
 ```text
-SignedContent {
-    body
-    signatures[]
-}
+[object_version, ContentBody, signatures[]]
 ```
 
-Signatures cover a deterministic canonical representation of the body.
-
-The containing object receives its CID after signatures are included.
-
-Possible identities therefore include:
+Each signature entry is `[algorithm, producer_id, public_key, signature]`.
+Algorithm `0x01` is Ed25519. The public key must derive the stated ProducerId,
+the body producer set must exactly match the unique signature identities, and
+each signature verifies over:
 
 ```text
-Body digest
-Signed object CID
+"populus/content-signature/v1\0" || canonical_body_bytes
 ```
 
-A multi-producer object can contain several signatures over the same body.
+Anonymous content has empty producer and signature arrays. The complete signed
+object, including signatures, is encoded as DAG-CBOR and receives its CID under
+the existing CIDv1 dag-cbor/sha2-256 profile.
+V1 assigns a CID to the complete signed object, not to the nested body alone.
+
+A multi-producer object can contain several independent signatures over the
+same canonical body. All arrays and map-like metadata have deterministic order.
+Tags, associations, and predecessor revisions are encoded as DAG-CBOR links
+(tag 42 over `0x00 || complete_ContentId_bytes`), not as untyped byte strings.
 
 Anonymous content contains no producer signature.
 
@@ -412,6 +418,13 @@ previous_revision_cid
 body
 signature(s)
 ```
+
+Sequence zero derives its stable MutableContentId from the signed immutable
+content CID (the genesis anchor) before the revision wrapper is encoded. Later
+revisions must preserve that mutable ID, increment the sequence by one, and
+name the preceding revision CID. Every revision wrapper is independently
+immutable and content-addressed. V1 defines chain integrity, not authorization
+or key continuity; those policies remain future work.
 
 Authorities index the current accepted head rather than mutating previously content-addressed objects.
 

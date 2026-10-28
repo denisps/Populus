@@ -460,3 +460,11 @@ Known unresolved issues
 Do not claim a test passed unless it was actually run.
 
 Do not claim a performance improvement without a measured result.
+
+## Out-of-scope ideas
+
+When implementation work surfaces a concrete idea that is useful but outside
+the current task, append a concise, actionable note to the repository-root
+`IDEAS.md` instead of expanding scope. Check for an existing equivalent before
+adding it, and remove or update an idea when it is implemented or no longer
+relevant.
