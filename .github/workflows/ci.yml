@@ -14,11 +14,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy, llvm-tools-preview
-      - name: Install pinned Cargo tools
-        run: |
-          cargo install --locked cargo-nextest --version 0.9.148
-          cargo install --locked cargo-machete --version 0.9.2
-          cargo install --locked cargo-deny --version 0.20.2
       - name: Run commit gate
         run: cargo xtask gate commit
       - name: Upload metrics

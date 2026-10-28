@@ -385,6 +385,10 @@ version = "0.1.0"
 [[package]]
 name = "populus-routing"
 version = "0.1.0"
+dependencies = [
+ "populus-types",
+ "proptest",
+]
 
 [[package]]
 name = "populus-sim"

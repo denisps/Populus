@@ -4,8 +4,12 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Output};
+use std::process::{Command, ExitCode, Output, Stdio};
 use std::time::Instant;
+
+const NEXTTEST_VERSION: &str = "0.9.148";
+const MACHETE_VERSION: &str = "0.9.2";
+const DENY_VERSION: &str = "0.20.2";
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = env::args().skip(1).collect();
@@ -36,7 +40,10 @@ fn run(root: &Path, arguments: &[String]) -> Result<(), String> {
             nextest(root)?;
             run_cargo(root, &["test", "--workspace", "--doc"])
         }
-        Some("coverage") => run_cargo(root, &["llvm-cov", "nextest", "--workspace"]),
+        Some("coverage") => {
+            ensure_nextest(root)?;
+            run_cargo(root, &["llvm-cov", "nextest", "--workspace"])
+        }
         Some("deps") => dependencies(root),
         Some("metrics") => {
             let quick = arguments.iter().any(|argument| argument == "--quick");
@@ -70,12 +77,43 @@ fn lint(root: &Path) -> Result<(), String> {
 }
 
 fn nextest(root: &Path) -> Result<(), String> {
+    ensure_nextest(root)?;
     run_cargo(root, &["nextest", "run", "--workspace"])
+}
+
+fn ensure_nextest(root: &Path) -> Result<(), String> {
+    ensure_cargo_tool(root, "nextest", "cargo-nextest", NEXTTEST_VERSION)
+}
+
+fn ensure_cargo_tool(
+    root: &Path,
+    command: &str,
+    package: &str,
+    version: &str,
+) -> Result<(), String> {
+    if cargo_tool_available(root, command) {
+        return Ok(());
+    }
+
+    println!("{package} is missing; installing pinned version {version}.");
+    run_cargo(
+        root,
+        &["install", "--locked", package, "--version", version],
+    )?;
+    if cargo_tool_available(root, command) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{package} {version} installation completed but `cargo {command}` is still unavailable"
+        ))
+    }
 }
 
 fn dependencies(root: &Path) -> Result<(), String> {
     run_cargo(root, &["tree", "-e", "features"])?;
     run_cargo(root, &["tree", "-d"])?;
+    ensure_cargo_tool(root, "machete", "cargo-machete", MACHETE_VERSION)?;
+    ensure_cargo_tool(root, "deny", "cargo-deny", DENY_VERSION)?;
     run_cargo(root, &["machete"])?;
     run_cargo(root, &["deny", "check"])
 }
@@ -84,7 +122,9 @@ fn gate_commit(root: &Path) -> Result<(), String> {
     run_cargo(root, &["fmt", "--check"])?;
     lint(root)?;
     nextest(root)?;
+    ensure_cargo_tool(root, "machete", "cargo-machete", MACHETE_VERSION)?;
     run_cargo(root, &["machete"])?;
+    ensure_cargo_tool(root, "deny", "cargo-deny", DENY_VERSION)?;
     run_cargo(root, &["deny", "check"])?;
     run_cargo(root, &["xtask", "metrics", "--quick"])
 }
@@ -112,6 +152,8 @@ fn cargo_tool_available(root: &Path, tool: &str) -> bool {
         .arg("--version")
         .env_remove("CARGO_PKG_NAME")
         .current_dir(root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -144,14 +186,21 @@ fn command_output(root: &Path, arguments: &[&str]) -> Result<Output, String> {
 }
 
 fn metrics(root: &Path, quick: bool) -> Result<(), String> {
-    run_cargo(root, &["clean"])?;
-    let clean_started = Instant::now();
-    run_cargo(root, &["build", "--workspace", "--release"])?;
-    let clean_build_ms = clean_started.elapsed().as_millis();
+    let (clean_build_ms, incremental_build_ms, quick_build_ms) = if quick {
+        let started = Instant::now();
+        run_cargo(root, &["build", "--workspace", "--release"])?;
+        (None, None, Some(started.elapsed().as_millis()))
+    } else {
+        run_cargo(root, &["clean"])?;
+        let clean_started = Instant::now();
+        run_cargo(root, &["build", "--workspace", "--release"])?;
+        let clean_build_ms = clean_started.elapsed().as_millis();
 
-    let incremental_started = Instant::now();
-    run_cargo(root, &["build", "--workspace", "--release"])?;
-    let incremental_build_ms = incremental_started.elapsed().as_millis();
+        let incremental_started = Instant::now();
+        run_cargo(root, &["build", "--workspace", "--release"])?;
+        let incremental_build_ms = incremental_started.elapsed().as_millis();
+        (Some(clean_build_ms), Some(incremental_build_ms), None)
+    };
 
     let tree = command_output(
         root,
@@ -206,6 +255,7 @@ fn metrics(root: &Path, quick: bool) -> Result<(), String> {
             "  \"duplicate_dependency_versions\": {duplicate_versions},\n",
             "  \"clean_build_duration_ms\": {clean_build_ms},\n",
             "  \"incremental_build_duration_ms\": {incremental_build_ms},\n",
+            "  \"quick_build_duration_ms\": {quick_build_ms},\n",
             "  \"hll_insert_cost\": null,\n",
             "  \"hll_merge_cost\": null,\n",
             "  \"hll_memory_bytes\": null,\n",
@@ -223,8 +273,9 @@ fn metrics(root: &Path, quick: bool) -> Result<(), String> {
         direct_dependencies = direct_dependencies,
         transitive_dependencies = transitive_dependencies,
         duplicate_versions = duplicate_versions,
-        clean_build_ms = clean_build_ms,
-        incremental_build_ms = incremental_build_ms,
+        clean_build_ms = json_number(clean_build_ms),
+        incremental_build_ms = json_number(incremental_build_ms),
+        quick_build_ms = json_number(quick_build_ms),
     );
     fs::write(&output_path, report)
         .map_err(|error| format!("could not write metrics report: {error}"))?;
@@ -373,7 +424,7 @@ fn release_binary_size(root: &Path) -> Option<u64> {
     fs::metadata(binary).ok().map(|metadata| metadata.len())
 }
 
-fn json_number(value: Option<u64>) -> String {
+fn json_number(value: Option<impl std::fmt::Display>) -> String {
     value.map_or_else(|| "null".to_owned(), |number| number.to_string())
 }
 

@@ -480,6 +480,14 @@ sort all known nodes by XOR distance
 
 Optimized routing must agree with that oracle for equivalent knowledge.
 
+The pure routing table stores up to 20 contacts in each of 256 buckets,
+classified by the most-significant differing bit from its local `NodeId`.
+Contacts exceeding a bucket's capacity are rejected until an existing contact
+is removed; no contact is evicted without transport liveness information.
+Nearest-node lookup is exact over the table's retained contacts, not over nodes
+the table has never learned. Routing state contains `NodeId` values only and
+does not substitute libp2p `PeerId` for Populus identity.
+
 ---
 
 # 7. Content authority cluster
