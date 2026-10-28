@@ -17,15 +17,18 @@ rustup component add rustfmt clippy llvm-tools-preview
 Recommended Cargo tools:
 
 ```bash
-cargo install --locked cargo-nextest
-cargo install --locked cargo-deny
-cargo install --locked cargo-machete
 cargo install --locked cargo-bloat
 cargo install --locked cargo-llvm-cov
 cargo install --locked cargo-mutants
 cargo install --locked cargo-semver-checks
 cargo install --locked iai-callgrind-runner
 ```
+
+The `cargo xtask test`, `test-all`, `coverage`, and `gate` commands install the
+repository-pinned `cargo-nextest` version on first use when it is missing.
+`gate` and `deps` similarly install pinned `cargo-machete` and `cargo-deny`
+versions as needed. These bootstraps require Cargo registry access; install the
+tools manually to prepare an offline environment.
 
 `cargo-fuzz` requires a compatible nightly toolchain and is used by fuzzing jobs rather than the normal fast development path.
 
@@ -55,6 +58,10 @@ Before committing:
 ```bash
 cargo xtask gate commit
 ```
+
+The commit gate's quick metrics build preserves Cargo's target cache and avoids
+a second redundant release build. Run `cargo xtask metrics` when clean and
+incremental build timings are needed.
 
 Before requesting review:
 
