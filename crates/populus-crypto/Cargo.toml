@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["fast", "signature", "std", "zeroize"] }
 populus-types = { version = "0.1.0", path = "../populus-types" }
 sha2.workspace = true
 

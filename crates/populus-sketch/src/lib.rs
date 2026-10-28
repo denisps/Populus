@@ -510,12 +510,10 @@ mod tests {
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ]);
             let register_index = (hash >> 50) as usize;
-            let remainder = hash << 14;
-            let rank = if remainder == 0 {
-                51
-            } else {
-                remainder.leading_zeros() as u8 + 1
-            };
+            let remainder = hash & ((1_u64 << 50) - 1);
+            let rank = (0_u8..50)
+                .find(|bit| remainder & (1_u64 << (49 - *bit)) != 0)
+                .map_or(51_u8, |leading_zeroes| leading_zeroes + 1);
             expected[register_index] = expected[register_index].max(rank);
             sketch.insert(id);
         }
