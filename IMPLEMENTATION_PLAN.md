@@ -715,15 +715,29 @@ partitions
 recovery
 ```
 
+The seeded `populus-sim` routing lifecycle scenario runs each operation at all
+three sizes, checks each table against the brute-force nearest-node oracle, and
+verifies that partitions remove cross-component contacts and recovery restores
+reachable contacts. This is a virtual routing-table model, not a transport or
+iterative-network simulation.
+
 No libp2p transport is needed yet.
 
 ---
 
 # 10. Phase 5: deterministic distributed simulator
 
-Before live networking, make the pure routing, cluster, ingest, and content protocols runnable in a deterministic simulator.
+Before live networking, provide a deterministic virtual-time event engine and run
+the implemented routing, content, and client-sketch APIs through it. The simulator
+is a first-class test oracle, not a demo. It must support seeded identities,
+latency and clock skew, scheduled node failures, and scripted malicious message
+behavior without sockets or wall-clock time.
 
-The simulator is a first-class test oracle, not a demo.
+The authority-cluster and ingest-buffer state machines are defined in later
+phases (7-10). Do not duplicate or prematurely specify those protocols in the
+simulator; wire their pure implementations into this engine as those phases land.
+Until then, simulator vote placement is only a workload generator and does not
+select the protocol's client-to-ingest assignment algorithm.
 
 Each simulation must accept:
 
@@ -741,6 +755,23 @@ malicious-node strategy
 A failed randomized simulation must print a seed that reproduces it exactly.
 
 Add small reference scenarios as permanent regression tests.
+
+Phase 5 is the simulator foundation, not an implementation of protocol phases
+that have not been built. Its coverage is incremental: every later phase that
+adds protocol behavior owns integrating that behavior into `populus-sim` and
+adding deterministic scenarios for its externally observable invariants. Do not
+duplicate or implement future protocol behavior in the simulator ahead of its
+owning phase. This applies to transport and routing integration in Phase 6,
+authority behavior in Phase 7, direct ingest in Phase 8, delegated assignment
+in Phase 9, delegated ingest in Phase 10, and each subsequent protocol phase.
+
+The foundation is complete when fixed-seed workloads are reproducible, failures
+report their seed, virtual time and configured faults are observable, and the
+implemented routing, content, and client-sketch APIs are exercised with
+independent checks. Phase 4's specified routing scales and lifecycle scenarios
+are a prerequisite and must be covered before closing Phase 5. Cluster and
+ingest behavior becomes a simulator requirement in the phase that implements
+each state machine.
 
 ---
 

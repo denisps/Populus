@@ -393,6 +393,13 @@ dependencies = [
 [[package]]
 name = "populus-sim"
 version = "0.1.0"
+dependencies = [
+ "populus-content",
+ "populus-crypto",
+ "populus-routing",
+ "populus-sketch",
+ "populus-types",
+]
 
 [[package]]
 name = "populus-sketch"
