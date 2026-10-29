@@ -5,5 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+populus-content = { version = "0.1.0", path = "../../crates/populus-content" }
+populus-crypto = { version = "0.1.0", path = "../../crates/populus-crypto" }
+populus-routing = { version = "0.1.0", path = "../../crates/populus-routing" }
+populus-sketch = { version = "0.1.0", path = "../../crates/populus-sketch" }
+populus-types = { version = "0.1.0", path = "../../crates/populus-types" }
+
 [lints]
 workspace = true

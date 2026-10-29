@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn virtual_network_sizes_survive_churn_partition_and_recovery() {
+    fn virtual_network_sizes_survive_churn_and_recovery() {
         for size in [100_u64, 1_000, 10_000] {
             let mut table = RoutingTable::new(node([0; 32]));
             let mut accepted = Vec::new();
