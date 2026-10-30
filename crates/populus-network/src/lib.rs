@@ -331,17 +331,21 @@ impl Transport {
     pub fn disconnect(&mut self, peer: libp2p::PeerId) -> bool {
         let disconnected = self.swarm.disconnect_peer_id(peer).is_ok();
         if disconnected {
-            let mut retained = VecDeque::with_capacity(self.queued_requests.len());
-            while let Some(request) = self.queued_requests.pop_front() {
-                if request.peer == peer {
-                    self.failed_requests.push_back((request.peer, request.id));
-                } else {
-                    retained.push_back(request);
-                }
-            }
-            self.queued_requests = retained;
+            self.fail_queued_for(peer);
         }
         disconnected
+    }
+
+    fn fail_queued_for(&mut self, peer: libp2p::PeerId) {
+        let mut retained = VecDeque::with_capacity(self.queued_requests.len());
+        while let Some(request) = self.queued_requests.pop_front() {
+            if request.peer == peer {
+                self.failed_requests.push_back((request.peer, request.id));
+            } else {
+                retained.push_back(request);
+            }
+        }
+        self.queued_requests = retained;
     }
 
     /// Sends a request and returns its local identifier.
@@ -425,6 +429,7 @@ impl Transport {
                     num_established: 0,
                     ..
                 } => {
+                    self.fail_queued_for(peer_id);
                     return TransportEvent::PeerDisconnected(peer_id);
                 }
                 libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::Requests(
@@ -1026,6 +1031,59 @@ mod tests {
             Some("peer disconnected before dispatch")
         );
         drop(response_channels);
+    }
+
+    #[tokio::test]
+    async fn tcp_loopback_fails_queued_requests_on_remote_disconnect() {
+        let mut server = super::Transport::new().expect("server transport");
+        let mut client = super::Transport::new().expect("client transport");
+        let server_peer = server.peer_id();
+        let client_peer = client.peer_id();
+        server
+            .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("loopback address"))
+            .expect("listen");
+        let address = loop {
+            if let super::TransportEvent::Listening(address) = server.next_event().await {
+                break address.with(Protocol::P2p(server_peer));
+            }
+        };
+        let request_ids: Vec<_> = (0..=super::MAX_CONCURRENT_REQUESTS)
+            .map(|index| {
+                client
+                    .send_request(
+                        server_peer,
+                        vec![address.clone()],
+                        index.to_be_bytes().to_vec(),
+                    )
+                    .expect("request capacity available")
+            })
+            .collect();
+
+        let mut response_channels = Vec::new();
+        let mut closed = false;
+        let mut failed = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while failed.len() < request_ids.len() || !closed {
+                tokio::select! {
+                    event = server.next_event(), if response_channels.len() < super::MAX_CONCURRENT_REQUESTS => {
+                        if let super::TransportEvent::Request { channel, .. } = event {
+                            response_channels.push(channel);
+                            if response_channels.len() == super::MAX_CONCURRENT_REQUESTS {
+                                assert!(server.disconnect(client_peer));
+                            }
+                        }
+                    }
+                    event = client.next_event() => match event {
+                        super::TransportEvent::RequestFailed { request_id, .. } => failed.push(request_id),
+                        super::TransportEvent::PeerDisconnected(peer) if peer == server_peer => closed = true,
+                        _ => {}
+                    },
+                }
+            }
+        })
+        .await
+        .expect("queued requests fail when the remote closes the connection");
+        assert!(request_ids.iter().all(|id| failed.contains(id)));
     }
 
     #[test]
