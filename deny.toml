@@ -1,6 +1,9 @@
 [advisories]
 unmaintained = "all"
 unsound = "all"
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "Required by libp2p TCP and QUIC through if-watch; paste is used only as a transitive proc-macro and has no maintained compatible release." },
+]
 
 [bans]
 multiple-versions = "warn"

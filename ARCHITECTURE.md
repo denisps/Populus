@@ -452,6 +452,20 @@ Do not force the Populus routing model into libp2p's existing PeerId-based Kadem
 
 Populus implements its own routing state and protocol while transporting messages over libp2p connections.
 
+`populus-network` owns the production transport adapter and keeps Swarm details
+out of routing and protocol state machines. It enables TCP and QUIC with Noise,
+Yamux, and DNS, and includes identify and ping behaviours. Application streams
+use `/populus/transport/1` request-response messages framed as a four-byte
+big-endian length and payload. The adapter rejects frames larger than 1 MiB
+before allocating payload storage and rejects oversized requests and responses
+before queueing or sending them. It limits buffered outbound work to 64 active
+and 64 additional requests queued or awaiting failure events, and applies a
+30-second request timeout. When the combined bound is full, the caller receives
+an explicit queue-full result and can retry after progress; work is never
+silently discarded or buffered without a limit.
+Transport peer identity remains `PeerId`; routing contacts remain
+scarce-network-derived `NodeId`.
+
 ---
 
 # 6. Populus XOR DHT
