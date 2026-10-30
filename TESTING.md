@@ -81,6 +81,10 @@ async authority state vs pure state-machine model
 
 Run many logical nodes and clients without sockets.
 
+Inject virtual time; do not use real sleeps in deterministic simulations. Use
+seeded randomness, and record each scenario's seed, configuration, and failure
+schedule. A failure report must include enough information to reproduce it.
+
 Simulate:
 
 ```text
@@ -551,6 +555,11 @@ O(log N)
 
 # 14. Fuzzing
 
+All remote input is hostile. Validate declared lengths before allocating, reject
+malformed input, unsupported versions, and oversized messages, and ensure
+decoders cannot panic, recurse without a bound, or allocate from unchecked
+remote values. Add fuzz coverage for new decoders.
+
 At minimum create fuzz targets for:
 
 ```text
@@ -702,6 +711,9 @@ mock so much that no real behavior remains
 only test the happy path
 silently retry flaky failures
 weaken bounds after a regression without analysis
+raise tolerances without analysis
+delete assertions or replace protocol checks with string checks
+skip/ignore tests or lower mutation expectations to make a run pass
 ```
 
 A flaky test is a bug.

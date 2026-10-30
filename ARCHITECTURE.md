@@ -45,6 +45,10 @@ Core principles:
 8. Prefer eventual convergence over unnecessary consensus.
 9. Keep content semantics independent from network identity.
 10. Preserve independent paths for verification.
+11. Design replicated transitions for duplicate, delayed, reordered, stale, and
+    conflicting messages, including sender/receiver failure or malice. Include
+    identity and epoch/sequence information in persistent or replicated state
+    where appropriate.
 ```
 
 ---

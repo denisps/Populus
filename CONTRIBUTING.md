@@ -32,6 +32,14 @@ tools manually to prepare an offline environment.
 
 `cargo-fuzz` requires a compatible nightly toolchain and is used by fuzzing jobs rather than the normal fast development path.
 
+Cargo and nextest commands are quiet by default: silence indicates success, and
+failures print their full output. To show passing test output, use:
+
+```bash
+cargo build --config term.quiet=false
+cargo nextest run --status-level pass --final-status-level pass --success-output final
+```
+
 ## Normal workflow
 
 Before editing:
