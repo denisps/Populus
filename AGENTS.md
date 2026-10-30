@@ -197,6 +197,18 @@ broad dependency feature activation
 large unrelated formatting changes
 ```
 
+## Quiet tool output
+
+Cargo and nextest are quiet by default (`.cargo/config.toml`, `.config/nextest.toml`).
+Silence is success: passing tests and `Compiling` lines are not printed, and failures are printed in full.
+
+To see full output for one command:
+
+```bash
+cargo build --config term.quiet=false
+cargo nextest run --status-level pass --final-status-level pass --success-output final
+```
+
 ---
 
 # 6. Testing rules for agents
