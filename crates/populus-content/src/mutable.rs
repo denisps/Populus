@@ -97,8 +97,13 @@ impl MutableRevision {
     ///
     /// Returns an error if its sequence, predecessor, or genesis anchor is invalid.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ContentError> {
-        self.validate()?;
         let content = self.content.canonical_bytes()?;
+        self.validate_chain(&content)?;
+        self.encode_unchecked(&content)
+    }
+
+    /// Encodes the revision around already-encoded, already-verified content.
+    fn encode_unchecked(&self, content: &[u8]) -> Result<Vec<u8>, ContentError> {
         let mut encoder = Encoder::new(Vec::new());
         encoder.array(5);
         encoder.u8(MUTABLE_REVISION_VERSION);
@@ -113,7 +118,7 @@ impl MutableRevision {
             }
         }
         let mut writer = encoder.into_writer();
-        writer.extend_from_slice(&content);
+        writer.extend_from_slice(content);
         let output = writer;
         check_encoded_size(&output)?;
         Ok(output)
@@ -176,18 +181,28 @@ impl MutableRevision {
             previous_revision,
             content,
         };
-        revision.validate()?;
-        if revision.canonical_bytes()? != encoded {
+        // The content was verified once while decoding.
+        let content_bytes = revision.content.encode_unchecked()?;
+        revision.validate_chain(&content_bytes)?;
+        if revision.encode_unchecked(&content_bytes)? != encoded {
             return Err(ContentError::NonCanonicalEncoding);
         }
         Ok(revision)
     }
 
+    /// Verifies the content and the revision-chain invariants.
     fn validate(&self) -> Result<(), ContentError> {
         self.content.verify()?;
+        let content_bytes = self.content.encode_unchecked()?;
+        self.validate_chain(&content_bytes)
+    }
+
+    /// Checks sequence, predecessor, and genesis anchor given the encoded,
+    /// already-verified content.
+    fn validate_chain(&self, content_bytes: &[u8]) -> Result<(), ContentError> {
         match (self.sequence, self.previous_revision) {
             (0, None) => {
-                let anchor = self.content.cid()?;
+                let anchor = content_id(content_bytes);
                 if self.mutable_id != mutable_content_id(&anchor) {
                     return Err(ContentError::InvalidRevisionChain);
                 }

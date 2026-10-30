@@ -133,25 +133,29 @@ fn validate_event_budget(
     Ok(())
 }
 
+/// Merges per-node report sketches into one summary per (view, content) pair.
 fn summarize_views(
     nodes: &[SimNode],
     contents: &[ContentSummary],
     expected_by_content: &[usize],
     metrics: &EventMetrics,
 ) -> Vec<ViewContentSummary> {
+    // Group reports once, preserving node order then window order per key.
+    let mut grouped: BTreeMap<(usize, usize), (ClientSketch, BTreeSet<_>)> = BTreeMap::new();
+    for node in nodes {
+        for (&(node_view, node_content, window), sketch) in &node.reports {
+            let (merged, windows) = grouped
+                .entry((usize::from(node_view), node_content))
+                .or_insert_with(|| (ClientSketch::new(), BTreeSet::new()));
+            merged.merge(sketch);
+            windows.insert(window);
+        }
+    }
+    let empty = (ClientSketch::new(), BTreeSet::new());
     let mut view_content = Vec::with_capacity(VIEW_COUNT.saturating_mul(contents.len()));
     for (view, view_counts) in metrics.accepted_by_view_content.iter().enumerate() {
         for (content_index, content) in contents.iter().enumerate() {
-            let mut merged = ClientSketch::new();
-            let mut report_windows = BTreeSet::new();
-            for node in nodes {
-                for (&(node_view, node_content, window), sketch) in &node.reports {
-                    if usize::from(node_view) == view && node_content == content_index {
-                        merged.merge(sketch);
-                        report_windows.insert(window);
-                    }
-                }
-            }
+            let (merged, report_windows) = grouped.get(&(view, content_index)).unwrap_or(&empty);
             view_content.push(ViewContentSummary {
                 view,
                 content_id: content.content_id,
@@ -165,6 +169,7 @@ fn summarize_views(
     view_content
 }
 
+/// Drains the scheduled event queue, applying failures and votes in order.
 fn process_events(
     nodes: &mut [SimNode],
     mut events: ScheduledEvents,
@@ -192,6 +197,7 @@ fn process_events(
     Ok(metrics)
 }
 
+/// Applies one vote event, honoring node liveness and malicious strategy.
 fn process_vote_event(
     nodes: &mut [SimNode],
     events: &mut ScheduledEvents,
