@@ -168,6 +168,12 @@ impl SignedContent {
     /// Returns an error if signatures or encoded size are invalid.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ContentError> {
         self.verify()?;
+        self.encode_unchecked()
+    }
+
+    /// Encodes the object without verifying signatures; callers must have
+    /// verified it already (for example via [`Self::new`]).
+    pub(super) fn encode_unchecked(&self) -> Result<Vec<u8>, ContentError> {
         let body = self.body.canonical_bytes()?;
         let mut encoder = Encoder::new(Vec::new());
         encoder.array(3);
@@ -208,13 +214,14 @@ impl SignedContent {
         let mut decoder = Decoder::new(encoded);
         let object = decode_signed_content(&mut decoder)?;
         finish_decoder(&decoder, encoded)?;
-        if object.canonical_bytes()? != encoded {
+        if object.encode_unchecked()? != encoded {
             return Err(ContentError::NonCanonicalEncoding);
         }
         Ok(object)
     }
 }
 
+/// Rejects adjacent duplicate keys in an already-sorted slice.
 fn ensure_unique_by<T, K: Ord>(values: &[T], key: impl Fn(&T) -> K) -> Result<(), ContentError> {
     if values.windows(2).any(|pair| key(&pair[0]) == key(&pair[1])) {
         return Err(ContentError::DuplicateItems);
@@ -222,6 +229,7 @@ fn ensure_unique_by<T, K: Ord>(values: &[T], key: impl Fn(&T) -> K) -> Result<()
     Ok(())
 }
 
+/// Builds the domain-separated bytes that producers sign.
 fn signature_preimage(body: &[u8]) -> Vec<u8> {
     let mut preimage = Vec::with_capacity(SIGNATURE_DOMAIN.len() + body.len());
     preimage.extend_from_slice(SIGNATURE_DOMAIN);

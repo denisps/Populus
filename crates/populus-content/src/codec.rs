@@ -138,6 +138,7 @@ fn read_bytes<'a>(decoder: &mut Decoder<'a>, maximum: usize) -> Result<&'a [u8],
     Ok(bytes)
 }
 
+/// Reads a text string no longer than `maximum` bytes.
 fn read_str<'a>(decoder: &mut Decoder<'a>, maximum: usize) -> Result<&'a str, ContentError> {
     let value = decoder.str()?;
     if value.len() > maximum {
@@ -146,14 +147,17 @@ fn read_str<'a>(decoder: &mut Decoder<'a>, maximum: usize) -> Result<&'a str, Co
     Ok(value)
 }
 
+/// Reads an unsigned 8-bit integer.
 pub(super) fn read_u8(decoder: &mut Decoder<'_>) -> Result<u8, ContentError> {
     decoder.u8()
 }
 
+/// Reads an unsigned 64-bit integer.
 pub(super) fn read_u64(decoder: &mut Decoder<'_>) -> Result<u64, ContentError> {
     decoder.u64()
 }
 
+/// Decodes a signed object, verifying it once and requiring canonical encoding.
 pub(super) fn decode_signed_content(
     decoder: &mut Decoder<'_>,
 ) -> Result<SignedContent, ContentError> {
@@ -191,12 +195,13 @@ pub(super) fn decode_signed_content(
     let end = decoder.position();
     let signed_bytes = input.get(start..end).ok_or(ContentError::InvalidEncoding)?;
     let object = SignedContent::new(body, signatures)?;
-    if object.canonical_bytes()? != signed_bytes {
+    if object.encode_unchecked()? != signed_bytes {
         return Err(ContentError::NonCanonicalEncoding);
     }
     Ok(object)
 }
 
+/// Reads a definite array length, rejecting indefinite or oversized arrays.
 fn read_array_len(decoder: &mut Decoder<'_>, maximum: usize) -> Result<usize, ContentError> {
     let Some(length) = decoder.array()? else {
         return Err(ContentError::InvalidEncoding);
@@ -208,6 +213,7 @@ fn read_array_len(decoder: &mut Decoder<'_>, maximum: usize) -> Result<usize, Co
     Ok(length)
 }
 
+/// Requires a definite array header of exactly `expected` items.
 pub(super) fn expect_array(decoder: &mut Decoder<'_>, expected: u64) -> Result<(), ContentError> {
     if decoder.array()? != Some(expected) {
         return Err(ContentError::InvalidEncoding);
@@ -215,6 +221,7 @@ pub(super) fn expect_array(decoder: &mut Decoder<'_>, expected: u64) -> Result<(
     Ok(())
 }
 
+/// Rejects trailing bytes after the decoded value.
 pub(super) fn finish_decoder(decoder: &Decoder<'_>, encoded: &[u8]) -> Result<(), ContentError> {
     if decoder.position() != encoded.len() {
         return Err(ContentError::InvalidEncoding);
@@ -222,6 +229,7 @@ pub(super) fn finish_decoder(decoder: &Decoder<'_>, encoded: &[u8]) -> Result<()
     Ok(())
 }
 
+/// Rejects encodings larger than the v1 content size limit.
 pub(super) fn check_encoded_size(encoded: &[u8]) -> Result<(), ContentError> {
     if encoded.len() > MAX_CONTENT_SIZE {
         return Err(ContentError::ContentTooLarge);
