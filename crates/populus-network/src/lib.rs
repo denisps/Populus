@@ -209,7 +209,9 @@ pub struct RequestId(u64);
 /// Failure to accept an outbound request into the bounded transport queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendRequestError {
-    /// Both active and queued request capacity are full; retry after progress.
+    /// The request payload exceeds [`MAX_FRAME_SIZE`].
+    PayloadTooLarge,
+    /// The combined active, queued, and pending-failure capacity is full.
     QueueFull,
     /// The local request identifier space is exhausted.
     IdentifierExhausted,
@@ -352,18 +354,26 @@ impl Transport {
     ///
     /// # Errors
     ///
-    /// Returns [`SendRequestError::QueueFull`] when the bounded active and
-    /// queued capacities are exhausted, or [`SendRequestError::IdentifierExhausted`]
-    /// if the local identifier space is exhausted.
+    /// Returns [`SendRequestError::PayloadTooLarge`] when the payload exceeds
+    /// [`MAX_FRAME_SIZE`], [`SendRequestError::QueueFull`] when the combined
+    /// active, queued, and pending-failure capacity is exhausted, or
+    /// [`SendRequestError::IdentifierExhausted`] if the local identifier space
+    /// is exhausted.
     pub fn send_request(
         &mut self,
         peer: libp2p::PeerId,
         addresses: Vec<Multiaddr>,
         request: Vec<u8>,
     ) -> Result<RequestId, SendRequestError> {
-        if self.active_requests.len() >= MAX_CONCURRENT_REQUESTS
-            && self.queued_requests.len() >= MAX_QUEUED_REQUESTS
-        {
+        if request.len() > MAX_FRAME_SIZE {
+            return Err(SendRequestError::PayloadTooLarge);
+        }
+        let buffered_requests = self
+            .active_requests
+            .len()
+            .saturating_add(self.queued_requests.len())
+            .saturating_add(self.failed_requests.len());
+        if buffered_requests >= MAX_CONCURRENT_REQUESTS + MAX_QUEUED_REQUESTS {
             return Err(SendRequestError::QueueFull);
         }
         let next_id = self
@@ -390,13 +400,17 @@ impl Transport {
     ///
     /// # Errors
     ///
-    /// Returns the response payload if the remote request has expired or
-    /// disconnected before the response could be sent.
+    /// Returns the response payload if it exceeds [`MAX_FRAME_SIZE`] or if the
+    /// remote request has expired or disconnected before the response could
+    /// be sent.
     pub fn send_response(
         &mut self,
         channel: ResponseChannel,
         response: Vec<u8>,
     ) -> Result<(), Vec<u8>> {
+        if response.len() > MAX_FRAME_SIZE {
+            return Err(response);
+        }
         self.swarm
             .behaviour_mut()
             .requests
@@ -656,6 +670,45 @@ mod tests {
         });
     }
 
+    #[test]
+    fn oversized_request_is_rejected_without_consuming_an_identifier() {
+        let mut transport = super::Transport::new().expect("transport");
+        let peer = transport.peer_id();
+        assert_eq!(
+            transport
+                .send_request(peer, Vec::new(), vec![0; MAX_FRAME_SIZE + 1],)
+                .expect_err("oversized request"),
+            super::SendRequestError::PayloadTooLarge
+        );
+        assert_eq!(
+            transport
+                .send_request(peer, Vec::new(), vec![0; MAX_FRAME_SIZE])
+                .expect("maximum-sized request is within the frame limit"),
+            super::RequestId(0)
+        );
+    }
+
+    #[test]
+    fn pending_failures_share_the_bounded_request_capacity() {
+        let mut transport = super::Transport::new().expect("transport");
+        let peer = transport.peer_id();
+        transport.failed_requests.extend(
+            (0..(super::MAX_CONCURRENT_REQUESTS + super::MAX_QUEUED_REQUESTS)).map(|id| {
+                (
+                    peer,
+                    super::RequestId(u64::try_from(id).expect("test ID fits u64")),
+                )
+            }),
+        );
+
+        assert_eq!(
+            transport
+                .send_request(peer, Vec::new(), Vec::new())
+                .expect_err("pending failures exhaust the combined capacity"),
+            super::SendRequestError::QueueFull
+        );
+    }
+
     async fn request_response_round_trip(protocol: &str) {
         let mut server = build_swarm().expect("server swarm");
         let mut client = build_swarm().expect("client swarm");
@@ -845,6 +898,46 @@ mod tests {
         .expect("retried request completes");
         assert_eq!(responses.len(), messages.len());
         assert!(messages.iter().all(|message| responses.contains(message)));
+    }
+
+    #[tokio::test]
+    async fn oversized_response_is_rejected_before_sending() {
+        let mut server = super::Transport::new().expect("server transport");
+        let mut client = super::Transport::new().expect("client transport");
+        let server_peer = server.peer_id();
+        server
+            .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("loopback address"))
+            .expect("listen");
+        let address = loop {
+            if let super::TransportEvent::Listening(address) = server.next_event().await {
+                break address.with(Protocol::P2p(server_peer));
+            }
+        };
+        client
+            .send_request(server_peer, vec![address], b"request".to_vec())
+            .expect("request capacity available");
+
+        let channel = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    event = server.next_event() => {
+                        if let super::TransportEvent::Request { channel, .. } = event {
+                            break channel;
+                        }
+                    }
+                    _ = client.next_event() => {}
+                }
+            }
+        })
+        .await
+        .expect("request arrives");
+        let oversized_response = vec![0; MAX_FRAME_SIZE + 1];
+        assert_eq!(
+            server
+                .send_response(channel, oversized_response.clone())
+                .expect_err("oversized response is rejected"),
+            oversized_response
+        );
     }
 
     #[tokio::test]

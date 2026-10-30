@@ -457,10 +457,12 @@ out of routing and protocol state machines. It enables TCP and QUIC with Noise,
 Yamux, and DNS, and includes identify and ping behaviours. Application streams
 use `/populus/transport/1` request-response messages framed as a four-byte
 big-endian length and payload. The adapter rejects frames larger than 1 MiB
-before allocating payload storage, limits outbound work to 64 active and 64
-queued requests, and applies a 30-second request timeout. When both bounds are
-full, the caller receives an explicit queue-full result and can retry after
-progress; work is never silently discarded or buffered without a limit.
+before allocating payload storage and rejects oversized requests and responses
+before queueing or sending them. It limits buffered outbound work to 64 active
+and 64 additional requests queued or awaiting failure events, and applies a
+30-second request timeout. When the combined bound is full, the caller receives
+an explicit queue-full result and can retry after progress; work is never
+silently discarded or buffered without a limit.
 Transport peer identity remains `PeerId`; routing contacts remain
 scarce-network-derived `NodeId`.
 
