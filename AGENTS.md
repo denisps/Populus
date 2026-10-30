@@ -1,482 +1,75 @@
 # AGENTS.md
 
-# AGENTS.md
-
-This repository is expected to be developed heavily by AI coding agents.
-
-The purpose of this file is to prevent locally reasonable changes from damaging protocol correctness, test quality, performance, or architectural simplicity.
-
-## Read first
-
-Before changing code, read in this order:
-
-```text
-1. AGENTS.md
-2. ARCHITECTURE.md
-3. IMPLEMENTATION_PLAN.md
-4. TESTING.md
-5. CONTRIBUTING.md
-6. README.md
-7. the README or module docs for the crate being changed
-```
-
-If these files conflict, stop and surface the conflict rather than silently choosing one.
-
----
-
-# 1. Core rules
-
-## Keep changes narrow
-
-One task should normally touch one subsystem.
-
-Do not perform opportunistic refactors unrelated to the requested behavior.
-
-Do not rename broad APIs while implementing an unrelated feature.
-
-## Preserve independent test oracles
-
-Never rewrite a reference implementation to use the optimized implementation it is supposed to check.
-
-Examples:
-
-```text
-routing oracle must remain brute-force
-HLL oracle must remain exact where feasible
-cluster oracle must remain pure and simpler than async implementation
-```
-
-## Tests must fail for the bug
-
-Before finalizing a fix, verify that the relevant new test would fail on the broken implementation.
-
-Do not merely add tests that execute the changed lines.
-
-## Never weaken tests to make code pass
-
-Do not:
-
-```text
-increase tolerance without analysis
-delete assertions
-replace exact protocol checks with string checks
-add retries to flaky tests
-skip tests
-mark tests ignored
-lower mutation expectations
-```
-
-unless the behavior requirement itself changed and documentation is updated.
-
----
-
-# 2. Architectural boundaries
-
-These identities are distinct:
-
-```text
-PeerId      = libp2p transport identity
-NodeId      = scarce-network-derived DHT position
-ClientId    = scarce-network-derived voting identity
-ProducerId  = public-key authorship identity
-ContentId   = content/object identity
-RoutingKey  = fixed-width XOR-routing key
-```
-
-Never substitute one for another because their byte lengths happen to match.
-
-Especially prohibited:
-
-```text
-NodeId = PeerId
-ClientId = ProducerId
-ProducerId = ClientId
-```
-
-Production Populus routing must not silently fall back to libp2p Kademlia's PeerId-based routing.
-
----
-
-# 3. Dependency rule
-
-Before adding a crate, search the workspace for an existing solution.
-
-A new runtime dependency needs justification.
-
-Prefer:
-
-```text
-std
-existing workspace dependency
-small focused crate
-```
-
-over a large framework.
-
-Do not enable dependency default features without inspecting them.
-
-After changing dependencies run:
-
-```bash
-cargo tree -e features
-cargo tree -d
-cargo machete
-cargo deny check
-cargo xtask metrics
-```
-
----
-
-# 4. Protocol changes
-
-If a change affects:
-
-```text
-hashing
-ID derivation
-encoding
-CID
-signatures
-routing
-authority selection
-delegation
-ingest assignment
-vote epochs
-tag propagation
-wire formats
-```
-
-then it is a protocol change.
-
-A protocol change requires:
-
-```text
-ARCHITECTURE.md update
-tests
-compatibility consideration
-test vectors when byte-level behavior changes
-```
-
-Do not make protocol behavior implicit in a helper function with no documentation.
-
----
-
-# 5. Working procedure
-
-For every task:
-
-```text
-A. Identify desired externally visible behavior.
-B. Identify relevant invariant IDs.
-C. Locate or create an independent oracle.
-D. Add focused tests.
-E. Implement the smallest change.
-F. Run focused tests.
-G. Run cargo xtask gate commit.
-H. Review git diff.
-I. Run cargo xtask metrics if hot path, dependency, or binary changed.
-J. Update architecture/docs where required.
-```
-
-Before declaring completion, inspect:
-
-```bash
-git diff --check
-git diff
-```
-
-Look specifically for:
-
-```text
-accidental generated files
-debug prints
-TODOs
-weakened tests
-new unwraps
-broad dependency feature activation
-large unrelated formatting changes
-```
-
-## Quiet tool output
-
-Cargo and nextest are quiet by default (`.cargo/config.toml`, `.config/nextest.toml`).
-Silence is success: passing tests and `Compiling` lines are not printed, and failures are printed in full.
-
-To see full output for one command:
-
-```bash
-cargo build --config term.quiet=false
-cargo nextest run --status-level pass --final-status-level pass --success-output final
-```
-
----
-
-# 6. Testing rules for agents
-
-Prefer assertions about:
-
-```text
-outputs
-state transitions
-invariants
-messages
-security decisions
-resource bounds
-```
-
-Avoid assertions about:
-
-```text
-private helper invocation counts
-debug strings
-private field layout
-incidental Vec ordering
-implementation-specific function names
-```
-
-Use property tests for algorithms.
-
-Use deterministic seeds.
-
-If a random test fails, preserve the seed as a regression case.
-
-If implementing an optimization:
-
-```text
-first prove equivalence against the reference implementation
-then benchmark
-```
-
----
-
-# 7. Simulator rules
-
-Do not use real time inside protocol state machines.
-
-Inject time.
-
-Do not use `thread::sleep` or `tokio::time::sleep` in deterministic simulation tests unless the clock is paused/virtualized.
-
-The simulator must remain reproducible.
-
-Every randomized scenario has:
-
-```text
-seed
-configuration
-failure schedule
-```
-
-A failure report must print enough information to rerun it.
-
----
-
-# 8. Network parser rules
-
-All remote input is hostile.
-
-Before allocating from a declared remote length:
-
-```text
-validate maximum
-```
-
-All decoders must:
-
-```text
-reject malformed input
-reject unsupported versions
-reject oversized messages
-never panic
-never recurse without a bound
-never allocate based on unchecked remote values
-```
-
-Add fuzz coverage for new decoders.
-
----
-
-# 9. Distributed-state rules
-
-Always ask:
-
-```text
-What if this message is duplicated?
-What if it is delayed?
-What if it arrives after a newer message?
-What if the sender crashes?
-What if the receiver crashes?
-What if the sender lies?
-What if the same message comes from two paths?
-```
-
-Every persistent or replicated state transition should have:
-
-```text
-epoch
-sequence/version
-identity
-```
-
-where appropriate.
-
-Do not rely solely on wall-clock ordering.
-
----
-
-# 10. Authority behavior
-
-Normal authority count is four.
-
-A single authority must not be able to:
-
-```text
-change authoritative cluster state alone
-disqualify another authority on an unsupported accusation
-rewrite finalized state
-select arbitrary delegates outside protocol rules
-```
-
-Authority-to-authority messages are signed.
-
-Signatures are evidence of what an authority said.
-
-They are not automatically a trust root for ordinary clients.
-
-Client confidence comes from independently discovering multiple expected in-cluster nodes and observing consistent state.
-
----
-
-# 11. HLL rules
-
-Do not treat HLL as an exact counter.
-
-Do not test HLL accuracy with one sample.
-
-Do not use HLL-derived set subtraction for security-critical decisions without documented statistical analysis.
-
-HLL merge must remain deterministic.
-
-If changing HLL representation:
-
-```text
-test old/new decoding if compatibility matters
-test sparse/dense transition
-test merge equivalence
-benchmark memory
-benchmark insertion
-benchmark merge
-```
-
----
-
-# 12. Delegated ingest rules
-
-Ingest reports are double-buffered.
-
-Never erase a pending report until all four authorities have acknowledged it.
-
-A new collection window begins immediately when the previous one closes.
-
-Minute HLLs from different shuffled views are not expected to be identical.
-
-Clock skew and latency may move clients across adjacent report windows.
-
-Judge convergence over wider windows and daily state.
-
----
-
-# 13. Performance rules
-
-Do not claim a speedup without measurement.
-
-When changing hot code, report:
-
-```text
-benchmark
-before
-after
-binary-size delta
-dependency delta
-```
-
-Prefer algorithmic improvements over micro-optimizations.
-
-Do not introduce unsafe code for speed without explicit approval and measurements proving the need.
-
----
-
-# 14. Binary-size rules
-
-Before adding large dependencies or broad features run:
-
-```bash
-cargo bloat --release --crates
-cargo tree -e features
-```
-
-Runtime bloat matters even if functionality is correct.
-
-Dev dependencies do not directly enlarge the release binary, but they still affect repository complexity and CI.
-
----
-
-# 15. Logging and debugging
-
-Use `tracing`.
-
-Temporary diagnostic output must not remain in commits.
-
-Do not test protocol correctness through log strings.
-
-Logs must not become an undocumented inter-process interface.
-
----
-
-# 16. Error handling
-
-Remote failures are expected.
-
-Prefer typed `Result`.
-
-Do not panic on:
-
-```text
-disconnect
-timeout
-invalid packet
-unknown version
-bad signature
-stale message
-missing peer
-full queue
-```
-
-A panic may be appropriate only for an internal invariant that cannot result from remote input.
-
----
-
-# 17. Completion report
-
-When an agent finishes a meaningful code task, its summary should contain:
-
-```text
-What changed
-What behavior/invariant it implements
-Tests added or changed
-Commands run
-Performance/binary/dependency impact
-Known unresolved issues
-```
-
-Do not claim a test passed unless it was actually run.
-
-Do not claim a performance improvement without a measured result.
+This repository is developed heavily by AI coding agents. These are the
+repository-wide guardrails; detailed protocol, testing, and contributor
+guidance belongs in the documents linked below.
+
+## Read relevant documentation
+
+Read this file first. Then read only the relevant sections, in this order:
+
+1. `ARCHITECTURE.md` for current behavior and protocol invariants.
+2. `IMPLEMENTATION_PLAN.md` for the relevant phase and planned work.
+3. `TESTING.md` for the applicable oracle, tests, and validation rules.
+4. `CONTRIBUTING.md` for development commands, dependencies, and review policy.
+5. `README.md` and the affected crate's README or module docs as needed.
+
+Do not load entire documents by default. Follow cross-references when the task
+touches another subsystem. If documents conflict, stop and surface the conflict
+instead of choosing silently.
+
+## Repository guardrails
+
+- Keep changes narrow; do not refactor unrelated APIs or behavior.
+- Preserve independent test oracles. Tests must detect the bug, and must not be
+  weakened to make an implementation pass. See `TESTING.md`.
+- `PeerId`, `NodeId`, `ClientId`, `ProducerId`, `ContentId`, and `RoutingKey`
+  are distinct protocol identities. Never substitute one for another;
+  production Populus routing must not fall back to PeerId-based libp2p
+  Kademlia. See `ARCHITECTURE.md` sections 2, 5, and 6.
+- Treat changes to hashing, identifiers, encoding, signatures, routing,
+  authority selection, delegation, ingest, epochs, tags, or wire behavior as
+  protocol changes. Update architecture, compatibility notes, and tests;
+  include vectors when bytes change. Do not leave protocol behavior implicit in
+  an undocumented helper. See `IMPLEMENTATION_PLAN.md` and `CONTRIBUTING.md`.
+- Remote input is hostile. Follow the decoder and fuzzing requirements in
+  `TESTING.md` section 14 and typed error guidance in `CONTRIBUTING.md`.
+- Distributed transitions must account for duplicate, delayed, reordered, and
+  stale messages, including failures and malicious peers. Include identity and
+  epoch/sequence information in replicated state where appropriate; see
+  `ARCHITECTURE.md` section 1.
+- Do not let one authority unilaterally alter authoritative state, disqualify
+  another authority, or rewrite finalized state. See `ARCHITECTURE.md`
+  sections 7-10, 16-17, and 22-23.
+- Keep HLLs approximate, merges deterministic, and the exact oracle independent.
+  Preserve delegated-ingest buffering and acknowledgement behavior. See
+  `ARCHITECTURE.md` sections 12-21 and `TESTING.md` sections 4 and 8-11.
+- Search the workspace before adding a crate or dependency. Runtime dependencies
+  require justification; follow the dependency and feature rules in
+  `IMPLEMENTATION_PLAN.md` section 3.4 and `CONTRIBUTING.md`.
+- Respect the workspace's `unsafe_code = "forbid"` policy. Use structured
+  `tracing`; return typed errors for expected failures. See `CONTRIBUTING.md`.
+
+## Implementation workflow
+
+1. Identify the externally visible behavior and relevant invariant.
+2. Locate the corresponding tests and an independent oracle where applicable.
+3. Add or update focused tests, then make the smallest implementation change.
+4. Run focused validation. Before committing, run `cargo xtask gate commit`.
+5. Inspect `git diff --check` and `git diff`; review generated files, weakened
+   tests, debug output, new panics/unwraps, broad dependency features, and
+   unrelated edits.
+6. Run `cargo xtask metrics` for hot-path, dependency, or binary changes, as
+   required by `CONTRIBUTING.md`.
+
+## Completion report
+
+For meaningful code changes, report what changed, the behavior or invariant,
+tests and commands actually run, performance/dependency impact, and unresolved
+issues. Do not claim unrun tests or unmeasured performance improvements.
 
 ## Out-of-scope ideas
 
-When implementation work surfaces a concrete idea that is useful but outside
-the current task, append a concise, actionable note to the repository-root
-`IDEAS.md` instead of expanding scope. Check for an existing equivalent before
-adding it, and remove or update an idea when it is implemented or no longer
-relevant.
+When implementation work reveals a concrete useful idea outside the task, check
+root `IDEAS.md` for an equivalent and add a concise actionable note there.
+Remove or update an idea when it is implemented or no longer relevant.
