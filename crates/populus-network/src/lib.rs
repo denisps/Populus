@@ -221,6 +221,20 @@ pub enum SendRequestError {
 #[derive(Debug)]
 pub struct ResponseChannel(request_response::ResponseChannel<Vec<u8>>);
 
+/// Failure to send an inbound response.
+#[derive(Debug)]
+pub enum SendResponseError {
+    /// The payload exceeds [`MAX_FRAME_SIZE`]; both values are available for retry.
+    PayloadTooLarge {
+        /// The pending response capability.
+        channel: ResponseChannel,
+        /// The rejected response payload.
+        response: Vec<u8>,
+    },
+    /// The request expired or disconnected before the response could be sent.
+    ChannelClosed(Vec<u8>),
+}
+
 /// Observable events from the transport adapter.
 #[derive(Debug)]
 pub enum TransportEvent {
@@ -400,21 +414,21 @@ impl Transport {
     ///
     /// # Errors
     ///
-    /// Returns the response payload if it exceeds [`MAX_FRAME_SIZE`] or if the
-    /// remote request has expired or disconnected before the response could
-    /// be sent.
+    /// Returns the channel and response if the payload exceeds [`MAX_FRAME_SIZE`].
+    /// If the request has expired or disconnected, returns the response payload.
     pub fn send_response(
         &mut self,
         channel: ResponseChannel,
         response: Vec<u8>,
-    ) -> Result<(), Vec<u8>> {
+    ) -> Result<(), SendResponseError> {
         if response.len() > MAX_FRAME_SIZE {
-            return Err(response);
+            return Err(SendResponseError::PayloadTooLarge { channel, response });
         }
         self.swarm
             .behaviour_mut()
             .requests
             .send_response(channel.0, response)
+            .map_err(SendResponseError::ChannelClosed)
     }
 
     /// Waits for the next application-relevant transport event.
@@ -901,7 +915,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_response_is_rejected_before_sending() {
+    #[allow(clippy::panic)]
+    async fn oversized_response_can_be_retried_with_the_same_channel() {
         let mut server = super::Transport::new().expect("server transport");
         let mut client = super::Transport::new().expect("client transport");
         let server_peer = server.peer_id();
@@ -913,7 +928,7 @@ mod tests {
                 break address.with(Protocol::P2p(server_peer));
             }
         };
-        client
+        let request_id = client
             .send_request(server_peer, vec![address], b"request".to_vec())
             .expect("request capacity available");
 
@@ -931,16 +946,48 @@ mod tests {
         })
         .await
         .expect("request arrives");
-        let oversized_response = vec![0; MAX_FRAME_SIZE + 1];
-        assert_eq!(
-            server
-                .send_response(channel, oversized_response.clone())
-                .expect_err("oversized response is rejected"),
-            oversized_response
-        );
+        let oversized_response = vec![0x42; MAX_FRAME_SIZE + 1];
+        let super::SendResponseError::PayloadTooLarge {
+            channel,
+            mut response,
+        } = server
+            .send_response(channel, oversized_response.clone())
+            .expect_err("oversized response is rejected")
+        else {
+            panic!("oversized response must retain its channel");
+        };
+        assert_eq!(response, oversized_response);
+        response.truncate(MAX_FRAME_SIZE);
+        server
+            .send_response(channel, response.clone())
+            .expect("maximum-sized response is accepted on the same channel");
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    _ = server.next_event() => {}
+                    event = client.next_event() => {
+                        match event {
+                            super::TransportEvent::Response { request_id: received_id, response: received, .. } => {
+                                assert_eq!(received_id, request_id);
+                                assert_eq!(received, response);
+                                break;
+                            }
+                            super::TransportEvent::RequestFailed { request_id: failed_id, .. } if failed_id == request_id => {
+                                panic!("request failed before receiving the retried response");
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("retried response arrives");
     }
 
     #[tokio::test]
+    #[allow(clippy::panic)]
     async fn tcp_loopback_cancels_pending_request_on_disconnect() {
         let mut server = super::Transport::new().expect("server transport");
         let mut client = super::Transport::new().expect("client transport");
@@ -997,7 +1044,28 @@ mod tests {
         })
         .await
         .expect("pending request is cancelled with the connection");
-        drop(response_channel);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    server.next_event().await,
+                    super::TransportEvent::PeerDisconnected(_)
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("server observes disconnect");
+        let response = b"too late".to_vec();
+        let error = server
+            .send_response(response_channel.expect("request channel"), response.clone())
+            .expect_err("closed channel rejects response");
+        match error {
+            super::SendResponseError::ChannelClosed(returned) => assert_eq!(returned, response),
+            super::SendResponseError::PayloadTooLarge { .. } => {
+                panic!("response is within the limit")
+            }
+        }
     }
 
     #[tokio::test]
