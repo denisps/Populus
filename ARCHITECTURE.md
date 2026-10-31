@@ -534,6 +534,20 @@ They should remain small and stable enough that they can closely cross-check one
 
 Authorities do not scale to hundreds or thousands simply because content becomes viral.
 
+The Phase 7 selector ranks only known eligible `NodeId`s by XOR distance to
+the `RoutingKey`, breaking equal distances by `NodeId`; it returns up to four
+contacts and does not imply the local neighborhood is complete. Membership
+views contain exactly four unique members, carry a generation, and preserve
+that canonical order. An incomplete local neighborhood is not an initialized
+authority cluster. A replacement view increments its generation.
+
+The initial replicated state contains the routing key, daily epoch, membership
+view, direct/delegated mode, delegation descriptor, rate state, daily
+popularity state, association summary, tag-reporting state, and a monotonic
+sequence. Subsystem payloads remain opaque to Phase 7 so their owning phases
+can define their formats; each payload is bounded to 1 MiB. Direct mode
+requires an empty delegation descriptor, while delegated mode requires one.
+
 Traffic scaling is delegated separately.
 
 ---
@@ -541,6 +555,29 @@ Traffic scaling is delegated separately.
 # 8. Authority communication
 
 All authority-to-authority messages are signed by the sender's transport/authority key.
+
+For Phase 7 state snapshots, the canonical v1 signed bytes are:
+
+```text
+"populus/authority-state-signature/v1"
+|| AuthorityId
+|| canonical_state
+```
+
+`canonical_state` is encoded as the fixed `populus/authority-state/v1` domain,
+the 32-byte `RoutingKey`, 8-byte big-endian epoch and sequence, 8-byte
+big-endian membership generation, one-byte mode and member count, each
+membership entry as `NodeId || AuthorityId || Ed25519 public key`, then the
+five component payloads in descriptor/rate/popularity/association/tag order.
+Each payload is a 4-byte big-endian length followed by its bytes. The message
+is signed with Ed25519 and the key must match the signer's membership entry.
+The same authority may not be treated as two members under different keys.
+State requests are also signed: their v1 preimage is the
+`populus/authority-state-request/v1` domain, requester `AuthorityId`,
+`RoutingKey`, membership generation, and request sequence. Receivers validate
+the request against the expected membership view; request sequence tracking
+provides replay detection. `testvectors/authority-v1.txt` fixes a canonical
+state encoding and signature for cross-implementation checks.
 
 Signed messages provide:
 
@@ -580,6 +617,17 @@ A B C E
 ```
 
 E requests replicated state from A, B, and C.
+
+Two matching, valid state snapshots from the three expected responders are
+sufficient to initialize E; a missing or conflicting third response does not
+lower that threshold. Invalid or unexpected replies are excluded and reported,
+not allowed to suppress an otherwise valid quorum. More generally, recovery
+requires a strict majority of the expected responders (three of four), so a
+two-vs-two partition cannot choose a state. No quorum means recovery/rebuild
+from retained reports or checkpoints, never a deterministic tie-break.
+Applying a quorum state requires the same routing key and membership basis and
+rejects epoch, sequence, or membership-generation rollback. Exact replays are
+idempotent.
 
 If:
 

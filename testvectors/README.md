@@ -61,6 +61,16 @@ ARCHITECTURE.md §2.2, assemble the payload and length fields above, and hash th
 resulting bytes with SHA-256. Expected digests are literal values and are never
 generated at test runtime by the production derivation functions.
 
+## Authority-state vector v1
+
+`authority-v1.txt` fixes the Phase 7 membership, state components, canonical
+state bytes, and Ed25519 signature. Four keys use seeds `0x01` through `0x04`
+repeated to 32 bytes. Their `NodeId` fixtures are 32-byte arrays with the
+member index in byte 0 and `index * 17` in byte 31. Members are sorted by XOR
+distance to the fixed routing key before constructing the view. The signature
+preimage is the `populus/authority-state-signature/v1` domain, the signer's
+32-byte `AuthorityId`, and the exact `canonical_state` bytes.
+
 ## Content vectors v1
 
 `content-v1.json` is the language-independent Phase 3 vector for canonical

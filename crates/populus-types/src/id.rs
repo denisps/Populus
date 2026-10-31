@@ -83,7 +83,7 @@ macro_rules! fixed_id {
         /// let node = NodeId::from_bytes([0; 32]);
         /// let _: ClientId = node;
         /// ```
-        #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name([u8; 32]);
 
         impl $name {

@@ -4,7 +4,7 @@ use crate::IdParseError;
 ///
 /// Its wire representation is exactly eight bytes in big-endian order. The
 /// protocol assigns meaning to epoch progression; this type performs no time logic.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Epoch(u64);
 
 impl Epoch {

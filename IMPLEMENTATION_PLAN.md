@@ -326,7 +326,7 @@ cargo xtask metrics --quick
 
 ```text
 cargo test --workspace --doc
-cargo llvm-cov
+cargo xtask coverage
 selected cargo mutants checks
 deterministic simulator scenarios
 iai-callgrind regression checks

@@ -5,6 +5,8 @@
 //! not delegated-ingest protocol assignment; future phases integrate their pure
 //! state machines here without duplicating their behavior.
 
+#[cfg(test)]
+mod authority;
 mod config;
 mod engine;
 mod report;

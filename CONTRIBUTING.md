@@ -6,29 +6,15 @@ Populus is a distributed-systems project where a locally plausible change can pr
 
 ## Development setup
 
-Install stable Rust through rustup.
-
-Required components:
-
-```bash
-rustup component add rustfmt clippy llvm-tools-preview
-```
-
-Recommended Cargo tools:
+Run the setup command once to install the pinned Cargo tools used by the
+standard test, coverage, dependency, and gate workflows:
 
 ```bash
-cargo install --locked cargo-bloat
-cargo install --locked cargo-llvm-cov
-cargo install --locked cargo-mutants
-cargo install --locked cargo-semver-checks
-cargo install --locked iai-callgrind-runner
+cargo xtask setup
 ```
 
-The `cargo xtask test`, `test-all`, `coverage`, and `gate` commands install the
-repository-pinned `cargo-nextest` version on first use when it is missing.
-`gate` and `deps` similarly install pinned `cargo-machete` and `cargo-deny`
-versions as needed. These bootstraps require Cargo registry access; install the
-tools manually to prepare an offline environment.
+The repository's `rust-toolchain.toml` selects stable Rust and the required
+components; rustup installs them automatically when needed.
 
 `cargo-fuzz` requires a compatible nightly toolchain and is used by fuzzing jobs rather than the normal fast development path.
 
