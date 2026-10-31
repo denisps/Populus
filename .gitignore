@@ -1,4 +1,5 @@
 /target/
+/.cache/populus-tools/
 /metrics/*.json
 /fuzz/target/
 /fuzz/artifacts/

@@ -298,6 +298,7 @@ Use `hyperloglogplus` only as a dev-only statistical/reference implementation if
 Initial commands:
 
 ```text
+cargo xtask setup
 cargo xtask fmt
 cargo xtask lint
 cargo xtask test
@@ -308,6 +309,15 @@ cargo xtask metrics
 cargo xtask gate commit
 cargo xtask gate pr
 ```
+
+`setup` checks the four pinned Cargo tools and installs only missing or mismatched
+versions in one locked, unoptimized dev-profile invocation, without debug
+information or incremental compilation, sharing build artifacts in the ignored
+`.cache/populus-tools/` directory. It also checks `rustfmt`, `clippy`, and
+`llvm-tools-preview` for the active toolchain and installs only missing components
+in one `rustup component add` invocation. No installer runs if everything is ready.
+Gates preflight all four pinned versions and all three Rust components and direct
+users to `cargo xtask setup` if any are unavailable; checks never invoke installers.
 
 `gate commit` must be reasonably fast.
 

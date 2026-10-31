@@ -7,10 +7,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output};
 use std::time::Instant;
 
-const NEXTTEST_VERSION: &str = "0.9.148";
-const LLVM_COV_VERSION: &str = "0.9.1";
-const MACHETE_VERSION: &str = "0.9.2";
-const DENY_VERSION: &str = "0.20.2";
+const RUST_COMPONENTS: [&str; 3] = ["rustfmt", "clippy", "llvm-tools-preview"];
+
+const TOOLS: [(&str, &str); 4] = [
+    ("nextest", "0.9.148"),
+    ("llvm-cov", "0.9.1"),
+    ("machete", "0.9.2"),
+    ("deny", "0.20.2"),
+];
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = env::args().skip(1).collect();
@@ -35,7 +39,10 @@ fn main() -> ExitCode {
 fn run(root: &Path, arguments: &[String]) -> Result<(), String> {
     match arguments.first().map(String::as_str) {
         Some("setup") => setup(root),
-        Some("fmt") => run_cargo(root, &["fmt"]),
+        Some("fmt") => {
+            require_components(root, &["rustfmt"])?;
+            run_cargo(root, &["fmt"])
+        }
         Some("lint") => lint(root),
         Some("test") => nextest(root),
         Some("test-all") => {
@@ -62,15 +69,124 @@ fn run(root: &Path, arguments: &[String]) -> Result<(), String> {
 }
 
 fn setup(root: &Path) -> Result<(), String> {
-    ensure_nextest(root)?;
-    ensure_cargo_tool(root, "llvm-cov", "cargo-llvm-cov", LLVM_COV_VERSION)?;
-    ensure_cargo_tool(root, "machete", "cargo-machete", MACHETE_VERSION)?;
-    ensure_cargo_tool(root, "deny", "cargo-deny", DENY_VERSION)?;
+    let missing = missing_components(&installed_components(root)?, &RUST_COMPONENTS);
+    if let Some(command) = component_setup_command(root, &missing) {
+        run_setup_command(command)?;
+    }
+    let missing = missing_tools(&TOOLS, |tool, version| {
+        cargo_tool_version_matches(root, tool, version)
+    });
+    if let Some(command) = setup_command(root, &missing) {
+        run_setup_command(command)?;
+    }
+    require_development_tools(root)?;
     println!("Populus development tools are ready.");
     Ok(())
 }
 
+fn run_setup_command(mut command: Command) -> Result<(), String> {
+    println!("$ {command:?}");
+    let status = command
+        .status()
+        .map_err(|error| format!("could not run {command:?}: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{command:?} exited with {status}"))
+    }
+}
+
+fn setup_command(root: &Path, tools: &[(&str, &str)]) -> Option<Command> {
+    if tools.is_empty() {
+        return None;
+    }
+    let mut command = Command::new("cargo");
+    command
+        .args(["install", "--locked", "--profile", "dev", "--target-dir"])
+        .arg(root.join(".cache/populus-tools"))
+        .args(
+            tools
+                .iter()
+                .map(|(tool, version)| format!("cargo-{tool}@{version}")),
+        )
+        .env("CARGO_PROFILE_DEV_DEBUG", "0")
+        .env("CARGO_PROFILE_DEV_INCREMENTAL", "false")
+        .env_remove("CARGO_PKG_NAME")
+        .current_dir(root);
+    Some(command)
+}
+
+fn component_setup_command(root: &Path, components: &[&str]) -> Option<Command> {
+    if components.is_empty() {
+        return None;
+    }
+    let mut command = Command::new("rustup");
+    command
+        .args(["component", "add"])
+        .args(components)
+        .current_dir(root);
+    Some(command)
+}
+
+fn installed_components(root: &Path) -> Result<String, String> {
+    let output = Command::new("rustup")
+        .args(["component", "list", "--installed"])
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!(
+            "could not inspect Rust components: {error}. Ensure rustup is available, then run `cargo xtask setup`."
+        ))?;
+    require_success(
+        &output,
+        "rustup component list --installed; run `cargo xtask setup` to install required components",
+    )?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn missing_components<'a>(installed: &str, components: &[&'a str]) -> Vec<&'a str> {
+    components
+        .iter()
+        .copied()
+        .filter(|component| {
+            // Rustup lists llvm-tools-preview under its canonical name, llvm-tools.
+            let name = component.trim_end_matches("-preview");
+            !installed.lines().any(|line| {
+                line == name
+                    || line
+                        .strip_prefix(name)
+                        .is_some_and(|suffix| suffix.starts_with('-'))
+            })
+        })
+        .collect()
+}
+
+fn require_components(root: &Path, components: &[&str]) -> Result<(), String> {
+    let missing = missing_components(&installed_components(root)?, components);
+    require_available(
+        &missing
+            .iter()
+            .map(|name| format!("Rust component {name}"))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn require_development_tools(root: &Path) -> Result<(), String> {
+    let mut missing: Vec<_> = missing_tools(&TOOLS, |tool, version| {
+        cargo_tool_version_matches(root, tool, version)
+    })
+    .iter()
+    .map(|(tool, version)| format!("cargo-{tool}@{version}"))
+    .collect();
+    missing.extend(
+        missing_components(&installed_components(root)?, &RUST_COMPONENTS)
+            .iter()
+            .map(|name| format!("Rust component {name}")),
+    );
+    require_available(&missing)
+}
+
 fn lint(root: &Path) -> Result<(), String> {
+    require_components(root, &["clippy"])?;
     run_cargo(
         root,
         &[
@@ -86,17 +202,13 @@ fn lint(root: &Path) -> Result<(), String> {
 }
 
 fn nextest(root: &Path) -> Result<(), String> {
-    ensure_nextest(root)?;
+    require_tools(root, &TOOLS[..1])?;
     run_cargo(root, &["nextest", "run", "--workspace"])
 }
 
-fn ensure_nextest(root: &Path) -> Result<(), String> {
-    ensure_cargo_tool(root, "nextest", "cargo-nextest", NEXTTEST_VERSION)
-}
-
 fn coverage(root: &Path) -> Result<(), String> {
-    ensure_nextest(root)?;
-    ensure_cargo_tool(root, "llvm-cov", "cargo-llvm-cov", LLVM_COV_VERSION)?;
+    require_tools(root, &TOOLS[..2])?;
+    require_components(root, &["llvm-tools-preview"])?;
 
     let arguments = [
         "llvm-cov",
@@ -258,54 +370,60 @@ fn format_coverage_percent(hit: usize, total: usize) -> Result<String, String> {
     Ok(format!("{}.{:01}", tenths / 10, tenths % 10))
 }
 
-fn ensure_cargo_tool(
-    root: &Path,
-    command: &str,
-    package: &str,
-    version: &str,
-) -> Result<(), String> {
-    if cargo_tool_version_matches(root, command, version) {
-        return Ok(());
-    }
+fn require_tools(root: &Path, tools: &[(&str, &str)]) -> Result<(), String> {
+    validate_tools(tools, |tool, version| {
+        cargo_tool_version_matches(root, tool, version)
+    })
+}
 
-    println!("{package} {version} is missing; installing the pinned version.");
-    run_cargo(
-        root,
-        &[
-            "install",
-            "--force",
-            "--locked",
-            package,
-            "--version",
-            version,
-        ],
-    )?;
-    if cargo_tool_version_matches(root, command, version) {
+fn missing_tools<'a>(
+    tools: &[(&'a str, &'a str)],
+    mut available: impl FnMut(&'a str, &'a str) -> bool,
+) -> Vec<(&'a str, &'a str)> {
+    tools
+        .iter()
+        .copied()
+        .filter(|(tool, version)| !available(tool, version))
+        .collect()
+}
+
+fn validate_tools<'a>(
+    tools: &[(&'a str, &'a str)],
+    available: impl FnMut(&'a str, &'a str) -> bool,
+) -> Result<(), String> {
+    let missing: Vec<_> = missing_tools(tools, available)
+        .iter()
+        .map(|(tool, version)| format!("cargo-{tool}@{version}"))
+        .collect();
+    require_available(&missing)
+}
+
+fn require_available(missing: &[String]) -> Result<(), String> {
+    if missing.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "{package} {version} installation completed but `cargo {command} --version` did not report the pinned version"
+            "Missing or incorrect development tools: {}. Install all required tools with `cargo xtask setup`.",
+            missing.join(", ")
         ))
     }
 }
 
 fn dependencies(root: &Path) -> Result<(), String> {
+    require_tools(root, &TOOLS[2..])?;
     run_cargo(root, &["tree", "-e", "features"])?;
     run_cargo(root, &["tree", "-d"])?;
-    ensure_cargo_tool(root, "machete", "cargo-machete", MACHETE_VERSION)?;
-    ensure_cargo_tool(root, "deny", "cargo-deny", DENY_VERSION)?;
     run_cargo(root, &["machete"])?;
     run_cargo(root, &["deny", "check"])
 }
 
 fn gate_commit(root: &Path) -> Result<(), String> {
+    require_development_tools(root)?;
     run_cargo(root, &["fmt", "--check"])?;
     lint(root)?;
     nextest(root)?;
-    ensure_cargo_tool(root, "machete", "cargo-machete", MACHETE_VERSION)?;
     run_cargo(root, &["machete"])?;
-    ensure_cargo_tool(root, "deny", "cargo-deny", DENY_VERSION)?;
-    run_cargo(root, &["deny", "check"])?;
+    run_cargo(root, &["deny", "check", "--hide-inclusion-graph"])?;
     run_cargo(root, &["xtask", "metrics", "--quick"])
 }
 
