@@ -1,13 +1,14 @@
 //! Developer commands and repository quality gates for Populus.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Output, Stdio};
+use std::process::{Command, ExitCode, Output};
 use std::time::Instant;
 
 const NEXTTEST_VERSION: &str = "0.9.148";
+const LLVM_COV_VERSION: &str = "0.9.1";
 const MACHETE_VERSION: &str = "0.9.2";
 const DENY_VERSION: &str = "0.20.2";
 
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
 
 fn run(root: &Path, arguments: &[String]) -> Result<(), String> {
     match arguments.first().map(String::as_str) {
+        Some("setup") => setup(root),
         Some("fmt") => run_cargo(root, &["fmt"]),
         Some("lint") => lint(root),
         Some("test") => nextest(root),
@@ -40,10 +42,7 @@ fn run(root: &Path, arguments: &[String]) -> Result<(), String> {
             nextest(root)?;
             run_cargo(root, &["test", "--workspace", "--doc"])
         }
-        Some("coverage") => {
-            ensure_nextest(root)?;
-            run_cargo(root, &["llvm-cov", "nextest", "--workspace"])
-        }
+        Some("coverage") => coverage(root),
         Some("deps") => dependencies(root),
         Some("metrics") => {
             let quick = arguments.iter().any(|argument| argument == "--quick");
@@ -55,10 +54,20 @@ fn run(root: &Path, arguments: &[String]) -> Result<(), String> {
             _ => Err("usage: cargo xtask gate <commit|pr>".to_owned()),
         },
         Some(command) => Err(format!("unknown xtask command: {command}")),
-        None => {
-            Err("usage: cargo xtask <fmt|lint|test|test-all|coverage|deps|metrics|gate>".to_owned())
-        }
+        None => Err(
+            "usage: cargo xtask <setup|fmt|lint|test|test-all|coverage|deps|metrics|gate>"
+                .to_owned(),
+        ),
     }
+}
+
+fn setup(root: &Path) -> Result<(), String> {
+    ensure_nextest(root)?;
+    ensure_cargo_tool(root, "llvm-cov", "cargo-llvm-cov", LLVM_COV_VERSION)?;
+    ensure_cargo_tool(root, "machete", "cargo-machete", MACHETE_VERSION)?;
+    ensure_cargo_tool(root, "deny", "cargo-deny", DENY_VERSION)?;
+    println!("Populus development tools are ready.");
+    Ok(())
 }
 
 fn lint(root: &Path) -> Result<(), String> {
@@ -85,26 +94,197 @@ fn ensure_nextest(root: &Path) -> Result<(), String> {
     ensure_cargo_tool(root, "nextest", "cargo-nextest", NEXTTEST_VERSION)
 }
 
+fn coverage(root: &Path) -> Result<(), String> {
+    ensure_nextest(root)?;
+    ensure_cargo_tool(root, "llvm-cov", "cargo-llvm-cov", LLVM_COV_VERSION)?;
+
+    let arguments = [
+        "llvm-cov",
+        "nextest",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--lcov",
+        "--summary-only",
+    ];
+    println!("$ cargo {}", arguments.join(" "));
+    let output = command_output(root, &arguments)?;
+    if !output.status.success() {
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        return Err(format!(
+            "cargo {} exited with {}",
+            arguments.join(" "),
+            output.status
+        ));
+    }
+
+    let summaries = parse_lcov_coverage(&String::from_utf8_lossy(&output.stdout), root)?;
+    println!("Coverage tests passed.");
+    for (package, counts) in summaries {
+        println!(
+            "{package}: {} files, lines {}/{} ({}%), functions {}/{} ({}%)",
+            counts.files,
+            counts.lines_hit,
+            counts.lines_found,
+            format_coverage_percent(counts.lines_hit, counts.lines_found)?,
+            counts.functions_hit,
+            counts.functions_found,
+            format_coverage_percent(counts.functions_hit, counts.functions_found)?,
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CoverageCounts {
+    files: usize,
+    functions_found: usize,
+    functions_hit: usize,
+    lines_found: usize,
+    lines_hit: usize,
+}
+
+impl CoverageCounts {
+    fn add_assign(&mut self, other: &Self) {
+        self.files += other.files;
+        self.functions_found += other.functions_found;
+        self.functions_hit += other.functions_hit;
+        self.lines_found += other.lines_found;
+        self.lines_hit += other.lines_hit;
+    }
+}
+
+fn parse_lcov_coverage(
+    report: &str,
+    root: &Path,
+) -> Result<BTreeMap<String, CoverageCounts>, String> {
+    let mut summaries = BTreeMap::new();
+    let mut current: Option<(String, CoverageCounts)> = None;
+
+    for line in report.lines() {
+        if let Some(source) = line.strip_prefix("SF:") {
+            if current.is_some() {
+                return Err(
+                    "LCOV report started a file before ending the previous record".to_owned(),
+                );
+            }
+            current = Some((
+                coverage_package_name(source, root)?,
+                CoverageCounts::default(),
+            ));
+        } else if line == "end_of_record" {
+            let Some((package, counts)) = current.take() else {
+                return Err("LCOV report ended a record without a source file".to_owned());
+            };
+            summaries
+                .entry(package)
+                .or_insert_with(CoverageCounts::default)
+                .add_assign(&CoverageCounts { files: 1, ..counts });
+        } else if let Some((prefix, field)) = [
+            ("FNF:", "functions_found"),
+            ("FNH:", "functions_hit"),
+            ("LF:", "lines_found"),
+            ("LH:", "lines_hit"),
+        ]
+        .into_iter()
+        .find(|(prefix, _)| line.starts_with(prefix))
+        {
+            let Some((_, counts)) = current.as_mut() else {
+                return Err(format!(
+                    "LCOV counter appeared outside a file record: {line}"
+                ));
+            };
+            let value = line
+                .strip_prefix(prefix)
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or_else(|| format!("invalid LCOV counter: {line}"))?;
+            match field {
+                "functions_found" => counts.functions_found = value,
+                "functions_hit" => counts.functions_hit = value,
+                "lines_found" => counts.lines_found = value,
+                "lines_hit" => counts.lines_hit = value,
+                _ => return Err(format!("unsupported LCOV counter: {field}")),
+            }
+        }
+    }
+
+    if current.is_some() {
+        return Err("LCOV report ended before closing the current file record".to_owned());
+    }
+    if summaries.is_empty() {
+        return Err("LCOV report contained no file coverage records".to_owned());
+    }
+    Ok(summaries)
+}
+
+fn coverage_package_name(source: &str, root: &Path) -> Result<String, String> {
+    let path = Path::new(source);
+    let relative = path.strip_prefix(root).map_err(|_| {
+        format!(
+            "coverage source is outside the workspace: {}",
+            path.display()
+        )
+    })?;
+    let mut components = relative.components();
+    let first = components
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .ok_or_else(|| format!("invalid workspace coverage path: {}", path.display()))?;
+    let package = if matches!(first, "crates" | "sim") {
+        components
+            .next()
+            .and_then(|component| component.as_os_str().to_str())
+            .ok_or_else(|| format!("missing package in coverage path: {}", path.display()))?
+    } else {
+        first
+    };
+    Ok(package.to_owned())
+}
+
+fn format_coverage_percent(hit: usize, total: usize) -> Result<String, String> {
+    let tenths = if total == 0 {
+        1_000
+    } else {
+        let hit = u128::try_from(hit)
+            .map_err(|error| format!("coverage count does not fit u128: {error}"))?;
+        let total = u128::try_from(total)
+            .map_err(|error| format!("coverage total does not fit u128: {error}"))?;
+        hit.saturating_mul(1_000)
+            .saturating_add(total / 2)
+            .checked_div(total)
+            .ok_or_else(|| "coverage total unexpectedly became zero".to_owned())?
+    };
+    Ok(format!("{}.{:01}", tenths / 10, tenths % 10))
+}
+
 fn ensure_cargo_tool(
     root: &Path,
     command: &str,
     package: &str,
     version: &str,
 ) -> Result<(), String> {
-    if cargo_tool_available(root, command) {
+    if cargo_tool_version_matches(root, command, version) {
         return Ok(());
     }
 
-    println!("{package} is missing; installing pinned version {version}.");
+    println!("{package} {version} is missing; installing the pinned version.");
     run_cargo(
         root,
-        &["install", "--locked", package, "--version", version],
+        &[
+            "install",
+            "--force",
+            "--locked",
+            package,
+            "--version",
+            version,
+        ],
     )?;
-    if cargo_tool_available(root, command) {
+    if cargo_tool_version_matches(root, command, version) {
         Ok(())
     } else {
         Err(format!(
-            "{package} {version} installation completed but `cargo {command}` is still unavailable"
+            "{package} {version} installation completed but `cargo {command} --version` did not report the pinned version"
         ))
     }
 }
@@ -133,11 +313,7 @@ fn gate_pr(root: &Path) -> Result<(), String> {
     gate_commit(root)?;
     run_cargo(root, &["test", "--workspace", "--doc"])?;
 
-    if cargo_tool_available(root, "llvm-cov") {
-        run_cargo(root, &["llvm-cov", "nextest", "--workspace"])?;
-    } else {
-        println!("SKIP: cargo-llvm-cov is not installed; coverage is unavailable.");
-    }
+    coverage(root)?;
 
     println!("SKIP: selected cargo-mutants checks are deferred until protocol targets exist.");
     println!("SKIP: deterministic simulator scenarios are deferred until scenarios exist.");
@@ -146,16 +322,23 @@ fn gate_pr(root: &Path) -> Result<(), String> {
     run_cargo(root, &["tree", "-d"])
 }
 
-fn cargo_tool_available(root: &Path, tool: &str) -> bool {
-    Command::new("cargo")
-        .arg(tool)
-        .arg("--version")
+fn cargo_tool_version_matches(root: &Path, tool: &str, version: &str) -> bool {
+    let output = Command::new("cargo")
+        .args([tool, "--version"])
         .env_remove("CARGO_PKG_NAME")
         .current_dir(root)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .output();
+    output.is_ok_and(|output| {
+        output.status.success()
+            && tool_version_matches(&String::from_utf8_lossy(&output.stdout), version)
+    })
+}
+
+fn tool_version_matches(output: &str, expected: &str) -> bool {
+    let Some(first_line) = output.lines().next() else {
+        return false;
+    };
+    first_line == expected || first_line.split_whitespace().nth(1) == Some(expected)
 }
 
 fn run_cargo(root: &Path, arguments: &[&str]) -> Result<(), String> {
@@ -396,7 +579,7 @@ fn duplicate_version_count(output: &Output) -> usize {
 }
 
 fn duplicate_version_count_from_tree(output: &str) -> usize {
-    let mut package_versions = std::collections::BTreeMap::<&str, BTreeSet<&str>>::new();
+    let mut package_versions = BTreeMap::<&str, BTreeSet<&str>>::new();
     for line in output.lines() {
         if let Some((name, version)) = package_identity(line) {
             package_versions.entry(name).or_default().insert(version);

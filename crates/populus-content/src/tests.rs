@@ -147,7 +147,7 @@ fn mutable_revision_chain_is_immutable_and_monotonic() {
         .expect("valid revision");
     assert!(decoded == next);
     assert!(genesis.cid().expect("cid") != next.cid().expect("cid"));
-    assert!(genesis.mutable_id() == next.mutable_id());
+    assert_eq!(genesis.mutable_id(), next.mutable_id());
 
     let invalid = MutableRevision {
         sequence: 2,

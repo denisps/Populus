@@ -18,6 +18,10 @@ Do not load entire documents by default. Follow cross-references when the task
 touches another subsystem. If documents conflict, stop and surface the conflict
 instead of choosing silently.
 
+Before broader workspace exploration, start `cargo xtask setup` in the
+background. Continue reading the relevant documentation while it runs, and
+confirm setup completed successfully before running tests, coverage, or gates.
+
 ## Repository guardrails
 
 - Keep changes narrow; do not refactor unrelated APIs or behavior.

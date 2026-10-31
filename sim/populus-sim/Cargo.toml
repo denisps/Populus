@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 populus-content = { version = "0.1.0", path = "../../crates/populus-content" }
+populus-cluster = { version = "0.1.0", path = "../../crates/populus-cluster" }
 populus-crypto = { version = "0.1.0", path = "../../crates/populus-crypto" }
 populus-routing = { version = "0.1.0", path = "../../crates/populus-routing" }
 populus-sketch = { version = "0.1.0", path = "../../crates/populus-sketch" }

@@ -35,9 +35,9 @@ fn assert_lookup_matches_oracle(table: &RoutingTable, target: RoutingKey) {
         contacts.len(),
         contacts.len().saturating_add(1),
     ] {
-        assert!(
-            table.closest_nodes(&target, limit)
-                == closest_nodes_brute_force(&target, &contacts, limit)
+        assert_eq!(
+            table.closest_nodes(&target, limit),
+            closest_nodes_brute_force(&target, &contacts, limit)
         );
     }
 }
@@ -116,7 +116,10 @@ fn insertion_order_does_not_change_logical_nearest_nodes() {
     }
 
     let target = RoutingKey::from_bytes([0x5a; 32]);
-    assert!(forward.closest_nodes(&target, 32) == reverse.closest_nodes(&target, 32));
+    assert_eq!(
+        forward.closest_nodes(&target, 32),
+        reverse.closest_nodes(&target, 32)
+    );
 }
 
 proptest! {

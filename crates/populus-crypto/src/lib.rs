@@ -138,6 +138,46 @@ pub struct ProducerKeypair {
     signing_key: SigningKey,
 }
 
+/// Ed25519 signing key for authority-to-authority protocol messages.
+///
+/// Authority keys are distinct at the type and identifier level from producer
+/// keys, even though both use the same v1 Ed25519 algorithm.
+pub struct AuthorityKeypair {
+    signing_key: SigningKey,
+}
+
+impl AuthorityKeypair {
+    /// Constructs an authority signing key from its 32-byte Ed25519 secret seed.
+    #[must_use]
+    pub fn from_secret_key(secret: [u8; 32]) -> Self {
+        Self {
+            signing_key: SigningKey::from_bytes(&secret),
+        }
+    }
+
+    /// Returns this key's 32-byte Ed25519 public key.
+    #[must_use]
+    pub fn public_key(&self) -> [u8; 32] {
+        self.signing_key.verifying_key().to_bytes()
+    }
+
+    /// Returns the domain-separated authority identity for this key.
+    #[must_use]
+    pub fn authority_id(&self) -> AuthorityId {
+        let public_key = self.public_key();
+        let mut payload = [0; 33];
+        payload[0] = PublicKeyAlgorithm::Ed25519 as u8;
+        payload[1..].copy_from_slice(&public_key);
+        AuthorityId::from_bytes(domain_hash(AUTHORITY_DOMAIN, &payload))
+    }
+
+    /// Signs an exact authority protocol message with Ed25519.
+    #[must_use]
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+        self.signing_key.sign(message).to_bytes()
+    }
+}
+
 impl ProducerKeypair {
     /// Constructs a signing key from its 32-byte Ed25519 secret seed.
     #[must_use]
@@ -186,6 +226,18 @@ pub fn verify_ed25519(
     verifying_key
         .verify_strict(message, &Signature::from_bytes(signature))
         .map_err(|_| CryptoError::InvalidSignature)
+}
+
+/// Validates that byte-array input is a valid Ed25519 public key.
+///
+/// # Errors
+///
+/// Returns [`CryptoError::InvalidPublicKey`] for bytes that are not a valid
+/// Ed25519 curve point.
+pub fn validate_ed25519_public_key(public_key: &[u8; 32]) -> Result<(), CryptoError> {
+    VerifyingKey::from_bytes(public_key)
+        .map(|_| ())
+        .map_err(|_| CryptoError::InvalidPublicKey)
 }
 
 fn key_payload(algorithm: PublicKeyAlgorithm, public_key: &[u8]) -> Result<[u8; 33], CryptoError> {

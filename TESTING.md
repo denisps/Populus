@@ -343,6 +343,12 @@ PeerQuarantined
 RecoveryNeeded
 ```
 
+The Phase 7 pure model signs state requests and snapshots, checks canonical
+four-node selection and state encoding, resolves strict-majority snapshots,
+reports invalid replies without suppressing a valid quorum, rejects replay and
+rollback, and verifies equivocation evidence. Its seeded replacement scenario
+is also exercised from `populus-sim` without sockets.
+
 The async/network implementation should be driven with command sequences and compared to this model where practical.
 
 Required scenarios:
@@ -609,11 +615,27 @@ Do not add meaningless assertions merely to kill a mutant.
 
 # 16. Coverage
 
-Use:
+Run the workspace coverage suite with:
 
 ```bash
-cargo llvm-cov nextest --workspace
+cargo xtask coverage
 ```
+
+The command runs all workspace targets and features, then prints one compact
+coverage summary per crate. It installs the repository-pinned
+`cargo-nextest` and `cargo-llvm-cov` tools if needed. For a detailed HTML
+report, run:
+
+```bash
+cargo llvm-cov nextest --workspace --all-targets --all-features --html
+```
+
+`cargo test --workspace --all-targets --all-features` also builds test harnesses
+for every binary and library target. Targets without `#[test]` functions report
+`0 tests`; this is expected for the current `populus-node` executable and the
+placeholder `populus-protocol` and `populus-store` crates. Add meaningful tests
+when those targets gain behavior; do not add empty smoke tests to suppress the
+zero count.
 
 Coverage is reported per crate and per changed file.
 

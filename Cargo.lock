@@ -2303,6 +2303,10 @@ dependencies = [
 [[package]]
 name = "populus-cluster"
 version = "0.1.0"
+dependencies = [
+ "populus-crypto",
+ "populus-types",
+]
 
 [[package]]
 name = "populus-content"
@@ -2354,6 +2358,7 @@ dependencies = [
 name = "populus-sim"
 version = "0.1.0"
 dependencies = [
+ "populus-cluster",
  "populus-content",
  "populus-crypto",
  "populus-routing",
