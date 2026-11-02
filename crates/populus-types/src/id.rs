@@ -176,3 +176,9 @@ fixed_id!(
     "A `RoutingKey` is a v1 domain-separated hash of a typed logical identifier. \
      It is exactly 32 bytes and is used only as a fixed-width Populus XOR target."
 );
+fixed_id!(
+    DailyVoteId,
+    "A `DailyVoteId` identifies the daily popularity bucket for one immutable ContentId. \
+     It is exactly 32 bytes and is derived from the content identifier and UTC day; it is \
+     not a ClientId and does not identify an individual client's vote."
+);

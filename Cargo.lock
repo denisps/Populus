@@ -2305,6 +2305,7 @@ name = "populus-cluster"
 version = "0.1.0"
 dependencies = [
  "populus-crypto",
+ "populus-sketch",
  "populus-types",
 ]
 

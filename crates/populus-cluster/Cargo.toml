@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 populus-crypto = { version = "0.1.0", path = "../populus-crypto" }
+populus-sketch = { version = "0.1.0", path = "../populus-sketch" }
 populus-types = { version = "0.1.0", path = "../populus-types" }
 
 [lints]

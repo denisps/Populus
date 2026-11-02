@@ -1,7 +1,7 @@
 use super::{
-    AuthorityId, ClientId, ContentId, ContentIdParseError, Epoch, IdParseError, MutableContentId,
-    NetworkIdentity, NetworkIdentityError, NetworkIdentityParseError, NodeId, ProducerId,
-    RoutingKey, XorDistance,
+    AuthorityId, ClientId, ContentId, ContentIdParseError, DailyVoteId, Epoch, IdParseError,
+    MILLIS_PER_UTC_DAY, MutableContentId, NetworkIdentity, NetworkIdentityError,
+    NetworkIdentityParseError, NodeId, ProducerId, RoutingKey, UtcDay, XorDistance,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, RngSeed};
@@ -18,6 +18,7 @@ fn id_hex_and_byte_round_trips() {
         AuthorityId::from_bytes(bytes).to_string(),
         MutableContentId::from_bytes(bytes).to_string(),
         RoutingKey::from_bytes(bytes).to_string(),
+        DailyVoteId::from_bytes(bytes).to_string(),
     ];
     assert!(ids.iter().all(|text| text == &"ab".repeat(32)));
     assert!(NodeId::from_str(&ids[0]).is_ok_and(|id| id.as_bytes() == &bytes));
@@ -26,12 +27,14 @@ fn id_hex_and_byte_round_trips() {
     assert!(AuthorityId::from_str(&ids[3]).is_ok_and(|id| id.as_bytes() == &bytes));
     assert!(MutableContentId::from_str(&ids[4]).is_ok_and(|id| id.as_bytes() == &bytes));
     assert!(RoutingKey::from_str(&ids[5]).is_ok_and(|id| id.as_bytes() == &bytes));
+    assert!(DailyVoteId::from_str(&ids[6]).is_ok_and(|id| id.as_bytes() == &bytes));
     assert!(ClientId::try_from(bytes.as_slice()).is_ok_and(|id| id.as_bytes() == &bytes));
     assert!(ClientId::try_from(&bytes[..31]).is_err());
     assert!(ProducerId::try_from(&bytes[..31]).is_err());
     assert!(AuthorityId::try_from(&bytes[..31]).is_err());
     assert!(MutableContentId::try_from(&bytes[..31]).is_err());
     assert!(RoutingKey::try_from(&bytes[..31]).is_err());
+    assert!(DailyVoteId::try_from(&bytes[..31]).is_err());
     assert!(NodeId::from_str(&"A".repeat(64)).is_err());
     assert!(NodeId::from_str("00").is_err());
     assert!(matches!(
@@ -74,6 +77,30 @@ fn epoch_is_big_endian_and_opaque() {
     assert!(Epoch::try_from(epoch.to_bytes().as_slice()).is_ok_and(|decoded| decoded == epoch));
     assert!(Epoch::try_from(&[0; 7][..]).is_err());
     assert!(Epoch::new(2) < Epoch::new(3));
+}
+
+#[test]
+fn utc_day_uses_euclidean_boundaries_and_signed_big_endian_encoding() {
+    assert_eq!(UtcDay::from_unix_millis(0), UtcDay::new(0));
+    assert_eq!(
+        UtcDay::from_unix_millis(MILLIS_PER_UTC_DAY - 1),
+        UtcDay::new(0)
+    );
+    assert_eq!(UtcDay::from_unix_millis(MILLIS_PER_UTC_DAY), UtcDay::new(1));
+    assert_eq!(UtcDay::from_unix_millis(-1), UtcDay::new(-1));
+    assert_eq!(
+        UtcDay::from_unix_millis(-MILLIS_PER_UTC_DAY),
+        UtcDay::new(-1)
+    );
+
+    let day = UtcDay::new(-2);
+    assert_eq!(day.to_bytes(), (-2_i64).to_be_bytes());
+    assert_eq!(UtcDay::from_bytes(day.to_bytes()), day);
+    assert_eq!(UtcDay::new(1).start_unix_millis(), Some(MILLIS_PER_UTC_DAY));
+    assert_eq!(
+        UtcDay::new(1).end_unix_millis(),
+        Some(2 * MILLIS_PER_UTC_DAY)
+    );
 }
 
 #[test]

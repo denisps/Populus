@@ -684,6 +684,12 @@ Initial maximum direct ingest target:
 
 This is a tunable engineering parameter, not a protocol constant until benchmarks justify it.
 
+Each authority inserts the already validated `ClientId` into its local daily
+sketch. Delivery is idempotent: inserting the same identity more than once for
+the same content and UTC day does not increase the distinct-client result.
+Binding a remote connection to its scarcity-derived `ClientId` remains the
+transport/authentication layer's responsibility.
+
 ---
 
 # 11. Daily popularity epochs
@@ -693,17 +699,51 @@ Persistent likes are represented through daily votes.
 Conceptually:
 
 ```text
-DailyVoteContentId =
+DailyVoteId =
     H(
         "populus/vote/v1"
         || ActualContentId
-        || UTC-date
+        || UtcDay
     )
 ```
+
+The v1 preimage is the raw concatenation of the 15-byte ASCII domain, the
+complete 36-byte `ContentId`, and the signed 8-byte big-endian day offset from
+1970-01-01. `DailyVoteId` names a content/day bucket; `ClientId` remains the
+distinct member inserted into that bucket's sketch. The canonical vector is
+`testvectors/daily-vote-v1.txt`.
+
+The direct-ingest snapshot is attached only to a direct-mode authority state
+whose `RoutingKey` is derived from that `ContentId` and whose eight-byte epoch
+encoding exactly matches the snapshot's `UtcDay`.
 
 A client with a persistent local like submits one vote during a day when it is online.
 
 An unlike stops subsequent daily votes.
+
+The canonical vote wire message is:
+
+```text
+"PDVT" || version=1 || ContentId[36] || ClientId[32] || UtcDay[i64be]
+|| DailyVoteId[32]
+```
+
+An authority receiver validates the daily bucket, content routing key,
+membership, and acceptance window before inserting `ClientId`. It then
+acknowledges acceptance using:
+
+```text
+"PDAK" || version=1 || ContentId[36] || ClientId[32] || UtcDay[i64be]
+|| DailyVoteId[32] || membership_generation[u64be]
+|| signer_AuthorityId[32] || Ed25519_signature[64]
+```
+
+The signature covers the raw concatenation of the
+`populus/direct-vote-ack/v1` domain, the vote's `ContentId`, `ClientId`, `UtcDay`,
+and `DailyVoteId`, followed by the membership generation. Clients verify each
+acknowledgement against the matching key in the pinned `MembershipView`.
+`testvectors/direct-vote-ack-v1.txt` fixes the vote bytes, signature preimage,
+and signed acknowledgement bytes.
 
 Consequences:
 
@@ -714,7 +754,37 @@ offline clients can still vote when they appear
 final daily count is known only after the epoch closes
 ```
 
-Realtime counts are provisional.
+Votes explicitly carry their `UtcDay`, so authority clock skew and network
+latency do not silently move a boundary-crossing delivery into a different
+daily sketch. Authorities accept early/late deliveries only within their
+configured clock-skew and close-grace allowances. A day remains provisional
+until its end plus both allowances; finalization is immutable, and later
+deliveries are rejected. The default grace (five minutes), clock allowance
+(one minute), and 1,000-votes/minute direct-rate target are configurable
+engineering defaults, not wire constants.
+
+Realtime counts are provisional. A persistent local like retries its pending
+daily vote until it receives a valid signed acknowledgement from each of the
+four authorities in the pinned membership view. A replacement membership
+generation re-targets the same pending vote and invalidates prior-view
+acknowledgements; duplicate delivery remains idempotent. The client skips fully
+offline days rather than backfilling them, and stops issuing future votes after
+unlike. Each authority snapshot
+stores the bounded encoding fixed by `testvectors/direct-ingest-v1.txt`:
+
+```text
+"PDIR" || version=1 || ContentId[36] || UtcDay[i64be]
+|| max_direct_rate[u64be] || grace_ms[u64be] || max_clock_skew_ms[u64be]
+|| finalized[u8] || rate_minute_tag[u8] || (minute[i64be] if present)
+|| minute_deliveries[u64be] || sketch_length[u32be] || canonical_PHLL_sketch
+```
+
+Decoders reject malformed or oversized state before allocation; the complete
+component remains subject to Phase 7's 1 MiB bound. The rate target is advisory:
+each authority counts deliveries in its latest fixed UTC-minute bucket, recommends
+delegation only after that bucket exceeds the configured target, and continues
+accepting valid direct votes. Assignment and delegated-ingest transitions remain
+owned by Phases 9-10.
 
 Authorities may track intra-day trends.
 
