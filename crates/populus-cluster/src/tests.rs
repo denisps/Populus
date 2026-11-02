@@ -4,8 +4,8 @@ use super::{
     ApplyOutcome, AuthorityComponents, AuthorityError, AuthorityKeypair, AuthorityMember,
     AuthorityMode, AuthorityReplica, AuthorityState, DirectIngestPolicy, DirectIngestState,
     EquivocationProof, MAX_STATE_COMPONENT_BYTES, MembershipView, RequestSequenceTracker,
-    SignedAuthorityState, SignedStateRequest, StateResolution, resolve_authority_state,
-    select_authorities,
+    SignedAuthorityState, SignedStateRequest, StateResolution, replace_authority,
+    resolve_authority_state, select_authorities,
 };
 use populus_crypto::{RoutingIdentifier, routing_key};
 use populus_types::{AuthorityId, ContentId, Epoch, NodeId, RoutingKey, UtcDay};
@@ -236,6 +236,95 @@ fn authority_membership_rejects_bad_keys_duplicates_and_wrong_sizes() {
     assert_eq!(
         MembershipView::new(RoutingKey::from_bytes([0xA5; 32]), 1, duplicates),
         Err(AuthorityError::DuplicateMember)
+    );
+}
+
+#[test]
+fn replacing_authority_keeps_three_members_and_uses_the_next_closest_outsider() {
+    let (_, known) = members(9);
+    let routing_key = RoutingKey::from_bytes([0; 32]);
+    let previous = MembershipView::new(
+        routing_key,
+        8,
+        select_authorities(&routing_key, &known).expect("unique known members"),
+    )
+    .expect("four closest members");
+    let departed = previous.members()[1].authority_id();
+
+    let mut outsiders = known
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            !previous
+                .members()
+                .iter()
+                .any(|member| member.node_id() == candidate.node_id())
+        })
+        .collect::<Vec<_>>();
+    outsiders.sort_unstable_by_key(|member| {
+        let distance: [u8; 32] = std::array::from_fn(|index| {
+            member.node_id().as_bytes()[index] ^ routing_key.as_bytes()[index]
+        });
+        (distance, member.node_id())
+    });
+    let expected_joiner = outsiders[0];
+
+    let replacement =
+        replace_authority(&previous, departed, &known).expect("known outsider replaces member");
+    assert_eq!(replacement.generation(), previous.generation() + 1);
+    assert!(replacement.member(departed).is_none());
+    for member in previous
+        .members()
+        .iter()
+        .filter(|member| member.authority_id() != departed)
+    {
+        assert_eq!(replacement.member(member.authority_id()), Some(member));
+    }
+    assert!(replacement.members().contains(&expected_joiner));
+
+    let expected_members = previous
+        .members()
+        .iter()
+        .copied()
+        .filter(|member| member.authority_id() != departed)
+        .chain([expected_joiner])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replacement.members(),
+        select_authorities(&routing_key, &expected_members)
+            .expect("replacement members are unique")
+    );
+}
+
+#[test]
+fn replacing_authority_requires_a_current_member_and_a_generation_successor() {
+    let (_, known) = members(5);
+    let routing_key = RoutingKey::from_bytes([0; 32]);
+    let selected = select_authorities(&routing_key, &known).expect("unique known members");
+    let previous =
+        MembershipView::new(routing_key, 4, selected.clone()).expect("four closest members");
+    let outsider = known
+        .iter()
+        .find(|member| !selected.contains(member))
+        .expect("one known outsider");
+    assert_eq!(
+        replace_authority(&previous, outsider.authority_id(), &known),
+        Err(AuthorityError::NotAMember)
+    );
+    assert_eq!(
+        replace_authority(
+            &previous,
+            previous.members()[0].authority_id(),
+            previous.members()
+        ),
+        Err(AuthorityError::NoReplacementMember)
+    );
+
+    let exhausted = MembershipView::new(routing_key, u64::MAX, selected)
+        .expect("four closest members at max generation");
+    assert_eq!(
+        replace_authority(&exhausted, exhausted.members()[0].authority_id(), &known),
+        Err(AuthorityError::MembershipGenerationOverflow)
     );
 }
 
@@ -1037,6 +1126,8 @@ fn authority_errors_have_diagnostic_display_messages() {
         AuthorityError::NonCanonicalMembership,
         AuthorityError::InvalidPublicKey,
         AuthorityError::NotAMember,
+        AuthorityError::NoReplacementMember,
+        AuthorityError::MembershipGenerationOverflow,
         AuthorityError::UnknownResponder,
         AuthorityError::RoutingKeyMismatch,
         AuthorityError::StaleRequest,

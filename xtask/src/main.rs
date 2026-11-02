@@ -463,8 +463,8 @@ fn gate_pr(root: &Path) -> Result<(), String> {
 
     coverage(root)?;
 
-    println!("SKIP: selected cargo-mutants checks are deferred until protocol targets exist.");
-    println!("SKIP: deterministic simulator scenarios are deferred until scenarios exist.");
+    println!("SKIP: selected cargo-mutants checks are deferred until the harness is installed.");
+    run_cargo(root, &["nextest", "run", "-p", "populus-sim"])?;
     println!("SKIP: iai-callgrind checks are deferred until benchmark harnesses exist.");
     println!("INFO: release binary-size measurements are included in the metrics artifact.");
     run_cargo(root, &["tree", "-d"])
