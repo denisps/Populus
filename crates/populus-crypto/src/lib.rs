@@ -2,8 +2,8 @@
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use populus_types::{
-    AuthorityId, ClientId, ContentId, MutableContentId, NetworkIdentity, NodeId, ProducerId,
-    RoutingKey,
+    AuthorityId, ClientId, ContentId, DailyVoteId, MutableContentId, NetworkIdentity, NodeId,
+    ProducerId, RoutingKey, UtcDay,
 };
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -14,6 +14,7 @@ const ROUTING_DOMAIN: &[u8] = b"populus/routing/v1";
 const PRODUCER_DOMAIN: &[u8] = b"populus/producer/v1";
 const AUTHORITY_DOMAIN: &[u8] = b"populus/authority/v1";
 const MUTABLE_DOMAIN: &[u8] = b"populus/mutable/v1";
+const VOTE_DOMAIN: &[u8] = b"populus/vote/v1";
 
 fn encoded_length<const N: usize>(length: usize) -> [u8; N] {
     let mut encoded = [0; N];
@@ -87,6 +88,20 @@ pub fn routing_key(identifier: RoutingIdentifier<'_>) -> RoutingKey {
         }
     };
     RoutingKey::from_bytes(domain_hash(ROUTING_DOMAIN, &payload[..payload_length]))
+}
+
+/// Derives the daily popularity bucket identity for an immutable content item.
+///
+/// The v1 preimage is the raw concatenation of `populus/vote/v1`, the complete
+/// 36-byte `ContentId`, and the signed 8-byte big-endian UTC day offset from
+/// 1970-01-01. The day bucket identifies the sketch scope, not an individual vote.
+#[must_use]
+pub fn daily_vote_id(content_id: &ContentId, day: UtcDay) -> DailyVoteId {
+    let mut hasher = Sha256::new();
+    hasher.update(VOTE_DOMAIN);
+    hasher.update(content_id.as_bytes());
+    hasher.update(day.to_bytes());
+    DailyVoteId::from_bytes(hasher.finalize().into())
 }
 
 /// Public-key algorithm identifiers supported by v1 producer and authority IDs.

@@ -1,8 +1,8 @@
 use super::{
     CryptoError, ProducerKeypair, PublicKeyAlgorithm, RoutingIdentifier, authority_id, client_id,
-    mutable_content_id, node_id, producer_id, routing_key, verify_ed25519,
+    daily_vote_id, mutable_content_id, node_id, producer_id, routing_key, verify_ed25519,
 };
-use populus_types::{ContentId, NetworkIdentity};
+use populus_types::{ContentId, NetworkIdentity, UtcDay};
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, RngSeed};
 use serde_json::Value;
@@ -95,6 +95,36 @@ fn content_and_mutable_vectors_match_independent_sha256_oracle() {
         verify_mutable_vector(&vectors, content, &content_id, content_hex);
         verify_routing_vectors(&vectors, &content_id, content_hex);
     }
+}
+
+#[test]
+#[allow(clippy::expect_used, clippy::panic)]
+fn daily_vote_vector_matches_the_exact_v1_preimage() {
+    let field = |name: &str| {
+        include_str!("../../../testvectors/daily-vote-v1.txt")
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("missing daily-vote vector field {name}"))
+    };
+    let content_bytes = decode_hex(field("content_id"));
+    let content_id = ContentId::try_from(content_bytes.as_slice())
+        .expect("daily-vote vector contains a valid ContentId");
+    let day_bytes = decode_hex(field("utc_day"));
+    let day_bytes: [u8; 8] = day_bytes
+        .as_slice()
+        .try_into()
+        .expect("daily-vote vector day is eight bytes");
+    let day = UtcDay::from_bytes(day_bytes);
+
+    let mut preimage = field("domain").as_bytes().to_vec();
+    preimage.extend_from_slice(content_id.as_bytes());
+    preimage.extend_from_slice(&day.to_bytes());
+    assert_eq!(hex(&preimage), field("preimage"));
+    assert_eq!(hex(&Sha256::digest(&preimage)), field("daily_vote_id"));
+    assert_eq!(
+        daily_vote_id(&content_id, day).to_string(),
+        field("daily_vote_id")
+    );
 }
 
 fn verify_mutable_vector(

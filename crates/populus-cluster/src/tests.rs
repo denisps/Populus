@@ -2,11 +2,13 @@
 
 use super::{
     ApplyOutcome, AuthorityComponents, AuthorityError, AuthorityKeypair, AuthorityMember,
-    AuthorityMode, AuthorityReplica, AuthorityState, EquivocationProof, MAX_STATE_COMPONENT_BYTES,
-    MembershipView, RequestSequenceTracker, SignedAuthorityState, SignedStateRequest,
-    StateResolution, resolve_authority_state, select_authorities,
+    AuthorityMode, AuthorityReplica, AuthorityState, DirectIngestPolicy, DirectIngestState,
+    EquivocationProof, MAX_STATE_COMPONENT_BYTES, MembershipView, RequestSequenceTracker,
+    SignedAuthorityState, SignedStateRequest, StateResolution, resolve_authority_state,
+    select_authorities,
 };
-use populus_types::{AuthorityId, Epoch, NodeId, RoutingKey};
+use populus_crypto::{RoutingIdentifier, routing_key};
+use populus_types::{AuthorityId, ContentId, Epoch, NodeId, RoutingKey, UtcDay};
 use std::fmt::Write as _;
 
 fn hex(bytes: &[u8]) -> String {
@@ -72,6 +74,65 @@ fn state(membership: MembershipView, epoch: u64, sequence: u64, marker: u8) -> A
         },
     )
     .expect("fixture state is valid")
+}
+
+#[test]
+fn direct_popularity_snapshot_is_bound_into_signed_authority_state() {
+    let (keys, known) = members(4);
+    let content_id = ContentId::from_digest([0x42; 32]);
+    let key = routing_key(RoutingIdentifier::Content(&content_id));
+    let membership = view_for(key, &known, 1);
+    let direct_state =
+        DirectIngestState::new(content_id, UtcDay::new(0), DirectIngestPolicy::default());
+    let daily_state_len = direct_state
+        .serialize()
+        .expect("daily sketch fits the state component limit")
+        .len();
+    let authority_state = AuthorityState::new(key, Epoch::new(0), membership.clone(), 1)
+        .with_direct_ingest_state(&direct_state)
+        .expect("daily state is bound to the content routing key");
+    let member_key = keys
+        .iter()
+        .find(|keypair| keypair.authority_id() == membership.members()[0].authority_id())
+        .expect("membership signer exists");
+    let signed_snapshot = sign(authority_state, member_key);
+    assert!(signed_snapshot.verify().is_ok());
+    assert_eq!(
+        signed_snapshot
+            .state()
+            .components()
+            .daily_popularity_state
+            .len(),
+        daily_state_len
+    );
+
+    let other_key = RoutingKey::from_bytes([0; 32]);
+    let other_membership = view_for(other_key, &known, 1);
+    assert_eq!(
+        AuthorityState::new(other_key, Epoch::new(0), other_membership, 1)
+            .with_direct_ingest_state(&direct_state),
+        Err(AuthorityError::RoutingKeyMismatch)
+    );
+
+    assert_eq!(
+        AuthorityState::new(key, Epoch::new(1), membership.clone(), 1)
+            .with_direct_ingest_state(&direct_state),
+        Err(AuthorityError::DailyEpochMismatch)
+    );
+
+    let delegated = AuthorityState::new(key, Epoch::new(0), membership, 1)
+        .with_components(
+            AuthorityMode::Delegated,
+            AuthorityComponents {
+                delegation_descriptor: vec![1],
+                ..AuthorityComponents::default()
+            },
+        )
+        .expect("delegated state has a descriptor");
+    assert_eq!(
+        delegated.with_direct_ingest_state(&direct_state),
+        Err(AuthorityError::DirectIngestModeRequired)
+    );
 }
 
 fn sign(state: AuthorityState, key: &AuthorityKeypair) -> SignedAuthorityState {

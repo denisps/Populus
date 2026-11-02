@@ -371,6 +371,17 @@ recovery after partition
 
 This is a critical area.
 
+Direct-ingest tests use an exact `BTreeSet<ClientId>` oracle for small daily
+populations. Verify duplicate/retry idempotence, explicit UTC-day assignment,
+clock-skew and late-delivery acceptance through grace, immutable finalization,
+offline client behavior, four-authority signed acknowledgement/retry behavior,
+membership replacement during a pending vote, advisory rate triggering, and
+snapshot restoration after an authority restart. The independent
+`daily-vote-v1.txt` vector checks the daily bucket preimage and hash;
+`direct-ingest-v1.txt` fixes the authority snapshot encoding independently
+from the high-level state API; `direct-vote-ack-v1.txt` fixes client vote and
+signed acknowledgement encodings.
+
 Minute HLLs are not expected to match exactly because ingest nodes may have:
 
 ```text
@@ -575,6 +586,7 @@ CID/content parser
 signed authority message decoder
 delegation descriptor decoder
 HLL decoder
+direct-ingest state decoder
 routing message decoder
 mutable revision decoder
 ```

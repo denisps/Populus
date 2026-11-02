@@ -2,11 +2,14 @@
 
 use crate::rng::{SeededRandom, random_identifier};
 use populus_cluster::{
-    AuthorityMember, AuthorityReplica, AuthorityState, MembershipView, SignedAuthorityState,
-    StateResolution, resolve_authority_state, select_authorities,
+    AuthorityMember, AuthorityReplica, AuthorityState, DailyPopularityStatus, DirectIngestPolicy,
+    DirectIngestState, DirectVote, MembershipView, SignedAuthorityState, StateResolution,
+    resolve_authority_state, select_authorities,
 };
 use populus_crypto::AuthorityKeypair;
-use populus_types::{Epoch, NodeId, RoutingKey};
+use populus_types::{ClientId, ContentId, Epoch, NodeId, RoutingKey, UtcDay};
+
+const DAY_MS: i64 = 86_400_000;
 
 #[test]
 fn seeded_authority_failover_initializes_from_two_matching_replicas() {
@@ -104,4 +107,71 @@ fn seeded_authority_failover_initializes_from_two_matching_replicas() {
             .count(),
         3
     );
+}
+
+#[test]
+fn direct_ingest_converges_across_authority_skew_latency_retry_and_restart() {
+    const SEED: u64 = 0xD1EC_7008;
+    let mut random = SeededRandom::new(SEED);
+    let content_id = ContentId::from_digest(random_identifier(&mut random, SEED));
+    let clients: Vec<_> = (0..2)
+        .map(|index| {
+            ClientId::from_bytes(random_identifier(
+                &mut random,
+                SEED + u64::try_from(index).unwrap_or(0) + 1,
+            ))
+        })
+        .collect();
+    let day = UtcDay::new(0);
+    let policy = DirectIngestPolicy::new(1_000, 5 * 60_000, 60_000)
+        .expect("simulation uses a nonzero direct-rate target");
+    let mut authorities: Vec<_> = (0..4)
+        .map(|_| DirectIngestState::new(content_id, day, policy))
+        .collect();
+    let first_vote = DirectVote::new(content_id, clients[0], day);
+    let boundary_arrivals = [
+        DAY_MS - 20_000,
+        DAY_MS - 1_000,
+        DAY_MS + 25_000,
+        DAY_MS + 45_000,
+    ];
+
+    for (index, received_at) in boundary_arrivals.into_iter().enumerate() {
+        authorities[index]
+            .record_vote(first_vote, received_at)
+            .expect("boundary-delayed vote remains inside configured grace");
+        if index == 3 {
+            let crashed = authorities[index]
+                .serialize()
+                .expect("daily authority state fits the replicated-state limit");
+            authorities[index] = DirectIngestState::deserialize(&crashed)
+                .expect("authority restart restores its daily sketch");
+        }
+        authorities[index]
+            .record_vote(first_vote, received_at + 100)
+            .expect("duplicate retry is idempotent");
+    }
+
+    let second_vote = DirectVote::new(content_id, clients[1], day);
+    for (index, authority) in authorities.iter_mut().enumerate() {
+        authority
+            .record_vote(
+                second_vote,
+                DAY_MS + 60_000 + i64::try_from(index).unwrap_or(0),
+            )
+            .expect("network-delayed daily vote is accepted");
+        assert_eq!(authority.estimate(), 2.0, "seed={SEED}, authority={index}");
+        assert!(matches!(
+            authority
+                .finalize(DAY_MS + 5 * 60_000)
+                .expect("simulated timestamp is representable"),
+            DailyPopularityStatus::Provisional { estimate: 2.0 }
+        ));
+        assert!(matches!(
+            authority
+                .finalize(DAY_MS + 6 * 60_000)
+                .expect("simulated timestamp is representable"),
+            DailyPopularityStatus::Finalized { estimate: 2.0 }
+        ));
+    }
 }

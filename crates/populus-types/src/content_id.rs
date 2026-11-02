@@ -13,7 +13,7 @@ use std::str::FromStr;
 /// let content = ContentId::from_digest([0; 32]);
 /// let _: MutableContentId = content;
 /// ```
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContentId([u8; 36]);
 
 /// Error returned when a CID is not in the restricted Populus v1 profile.

@@ -35,7 +35,10 @@ fn canonical_body_is_stable_across_set_and_map_insertion_order() {
     );
     let left_object = SignedContent::new(left, Vec::new()).expect("anonymous content");
     let right_object = SignedContent::new(right, Vec::new()).expect("anonymous content");
-    assert!(left_object.cid().expect("cid") == right_object.cid().expect("cid"));
+    assert_eq!(
+        left_object.cid().expect("cid"),
+        right_object.cid().expect("cid")
+    );
 }
 
 #[test]
@@ -50,7 +53,7 @@ fn immutable_content_cid_changes_with_body_and_anonymous_content_needs_no_signat
         Vec::new(),
     )
     .expect("anonymous content");
-    assert!(object.cid().expect("cid") != changed.cid().expect("cid"));
+    assert_ne!(object.cid().expect("cid"), changed.cid().expect("cid"));
 }
 
 #[test]
@@ -146,7 +149,7 @@ fn mutable_revision_chain_is_immutable_and_monotonic() {
     let decoded = MutableRevision::from_bytes(&next.canonical_bytes().expect("encoded revision"))
         .expect("valid revision");
     assert!(decoded == next);
-    assert!(genesis.cid().expect("cid") != next.cid().expect("cid"));
+    assert_ne!(genesis.cid().expect("cid"), next.cid().expect("cid"));
     assert_eq!(genesis.mutable_id(), next.mutable_id());
 
     let invalid = MutableRevision {

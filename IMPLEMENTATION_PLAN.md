@@ -884,7 +884,7 @@ A node may be automatically disqualified only for objectively provable protocol 
 
 # 13. Phase 8: direct ingest
 
-Small ContentIDs are handled directly by all four authorities.
+Small `ContentId`s are handled directly by all four authorities.
 
 Each authority maintains HLL state.
 
@@ -901,10 +901,10 @@ Votes use daily epochs.
 Conceptually:
 
 ```text
-VoteId = H(
+DailyVoteId = SHA-256(
     "populus/vote/v1"
     || ActualContentId
-    || UTC-date
+    || signed UTC-day offset since 1970-01-01
 )
 ```
 
@@ -925,9 +925,26 @@ network latency
 authority crash during ingest
 ```
 
-Daily totals are authoritative only after an appropriate close/grace period.
+The direct-ingest state is a pure model bound to one `ContentId` and `UtcDay`.
+All four authorities consume the same client-selected daily epoch, insert
+validated `ClientId`s idempotently into their own `ClientSketch`, and replicate
+the versioned bounded snapshot through Phase 7 state. Clients retry a pending
+vote until all four authorities in the pinned membership view return valid
+signed acknowledgements or the vote expires; a membership replacement
+re-targets the same vote. Clients retry through the following UTC day, then
+discard a still-pending vote when returning two or more days later and vote
+only for the current day. The combined configurable close-grace and clock-skew
+allowance is bounded to one day so this expiry cannot discard a vote that
+authorities could still accept.
+Configurable close grace and clock-skew allowances keep boundary-delayed votes
+provisional before finalization. Exceeding the configurable direct-rate target
+recommends delegation but does not discard votes; assignment and delegated-
+ingest transitions remain owned by Phases 9-10.
 
-Realtime counts are provisional.
+The canonical daily-bucket hash and authority snapshot bytes are fixed by
+`testvectors/daily-vote-v1.txt` and `testvectors/direct-ingest-v1.txt`.
+Direct-vote and signed-ack wire bytes are fixed by
+`testvectors/direct-vote-ack-v1.txt`.
 
 ---
 

@@ -12,6 +12,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.13"
 populus-sketch = { version = "0.1.0", path = "../crates/populus-sketch" }
 populus-content = { version = "0.1.0", path = "../crates/populus-content" }
+populus-cluster = { version = "0.1.0", path = "../crates/populus-cluster" }
 populus-types = { version = "0.1.0", path = "../crates/populus-types" }
 
 [lib]
@@ -34,6 +35,13 @@ bench = false
 [[bin]]
 name = "content_decoder"
 path = "fuzz_targets/content_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "direct_ingest_decoder"
+path = "fuzz_targets/direct_ingest_decoder.rs"
 test = false
 doc = false
 bench = false

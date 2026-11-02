@@ -1,10 +1,18 @@
 //! Deterministic authority selection and pure replicated-state handling.
 
+mod direct_ingest;
+
 use populus_crypto::{
     AuthorityKeypair, PublicKeyAlgorithm, authority_id, validate_ed25519_public_key, verify_ed25519,
 };
 use populus_types::{AuthorityId, Epoch, NodeId, RoutingKey, XorDistance};
 use std::collections::BTreeSet;
+
+pub use direct_ingest::{
+    DEFAULT_CLOSE_GRACE_PERIOD_MS, DEFAULT_MAX_CLOCK_SKEW_MS, DEFAULT_MAX_DIRECT_VOTES_PER_MINUTE,
+    DailyPopularityStatus, DirectIngestError, DirectIngestPolicy, DirectIngestState, DirectVote,
+    DirectVoteOutcome, PersistentLike, SignedDirectVoteAck,
+};
 
 /// Number of authorities selected for a routing key.
 pub const AUTHORITY_COUNT: usize = 4;
@@ -249,6 +257,42 @@ impl AuthorityState {
         validate_components(mode, &components)?;
         self.mode = mode;
         self.components = components;
+        Ok(self)
+    }
+
+    /// Replaces the daily popularity component with a matching direct-ingest snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthorityError::DirectIngestModeRequired`] unless this state
+    /// is in direct mode, [`AuthorityError::RoutingKeyMismatch`] when the
+    /// snapshot belongs to another content authority,
+    /// [`AuthorityError::DailyEpochMismatch`] when its UTC day does not match
+    /// the authority epoch,
+    /// [`AuthorityError::InvalidDirectIngestState`] if its epoch or policy is
+    /// not representable, or [`AuthorityError::StateComponentTooLarge`] if it
+    /// exceeds the state bound.
+    pub fn with_direct_ingest_state(
+        mut self,
+        direct_state: &DirectIngestState,
+    ) -> Result<Self, AuthorityError> {
+        if self.mode != AuthorityMode::Direct {
+            return Err(AuthorityError::DirectIngestModeRequired);
+        }
+        if self.routing_key != direct_state.routing_key() {
+            return Err(AuthorityError::RoutingKeyMismatch);
+        }
+        if self.epoch.to_bytes() != direct_state.scope().1.to_bytes() {
+            return Err(AuthorityError::DailyEpochMismatch);
+        }
+        self.components.daily_popularity_state = direct_state.serialize().map_err(|error| {
+            if error == DirectIngestError::StateTooLarge {
+                AuthorityError::StateComponentTooLarge
+            } else {
+                AuthorityError::InvalidDirectIngestState
+            }
+        })?;
+        validate_components(self.mode, &self.components)?;
         Ok(self)
     }
 
@@ -911,6 +955,12 @@ pub enum AuthorityError {
     InvalidSignature,
     /// Direct/delegated mode does not match the descriptor presence.
     InvalidModeDescriptor,
+    /// A direct-ingest sketch was attached to a delegated authority state.
+    DirectIngestModeRequired,
+    /// A direct-ingest epoch or policy cannot be represented by the authority state.
+    InvalidDirectIngestState,
+    /// The direct-ingest UTC day does not match the authority's daily epoch.
+    DailyEpochMismatch,
     /// A replicated state component exceeds its size bound.
     StateComponentTooLarge,
     /// A state transition was not based on the replica's current membership.
@@ -940,6 +990,11 @@ impl std::fmt::Display for AuthorityError {
             }
             Self::InvalidSignature => "invalid authority state signature",
             Self::InvalidModeDescriptor => "authority mode and delegation descriptor disagree",
+            Self::DirectIngestModeRequired => "direct-ingest state requires direct authority mode",
+            Self::InvalidDirectIngestState => {
+                "direct-ingest state has an unrepresentable epoch or policy"
+            }
+            Self::DailyEpochMismatch => "direct-ingest UTC day does not match the authority epoch",
             Self::StateComponentTooLarge => "authority state component exceeds its size limit",
             Self::RoutingKeyMismatch => "authority state belongs to another routing key",
             Self::MembershipMismatch => "authority state transition uses a different membership",
