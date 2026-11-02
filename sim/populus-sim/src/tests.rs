@@ -1,6 +1,9 @@
+#![allow(clippy::expect_used)]
+
 use super::{
-    ClockSkewDistribution, FailureAction, FailureEvent, LatencyDistribution, MaliciousStrategy,
-    SimulationConfig, SimulationError, VIEW_COUNT, run_simulation,
+    ByzantineAction, ByzantineScript, ClockSkewDistribution, FailureAction, FailureEvent,
+    LatencyDistribution, LifecycleAction, LifecycleEvent, MaliciousStrategy, PACKET_LOSS_SCALE,
+    PartitionAction, PartitionEvent, SimulationConfig, SimulationError, VIEW_COUNT, run_simulation,
 };
 
 fn small_config() -> SimulationConfig {
@@ -251,4 +254,269 @@ fn randomized_run_errors_include_the_reproduction_seed() {
             config.seed
         ))
     );
+}
+
+#[test]
+fn seeded_jitter_loss_and_reordering_are_reproducible_and_observable() {
+    const SEED: u64 = 0xFA17_0001;
+    let control = SimulationConfig {
+        seed: SEED,
+        node_count: 7,
+        client_count: 35,
+        latency: LatencyDistribution::Fixed(0),
+        ..SimulationConfig::default()
+    };
+    let faulted = SimulationConfig {
+        jitter: Some(LatencyDistribution::Uniform {
+            min_ms: 0,
+            max_ms: 40,
+        }),
+        packet_loss_probability: 200_000,
+        reordering: Some(LatencyDistribution::Uniform {
+            min_ms: 0,
+            max_ms: 100,
+        }),
+        ..control.clone()
+    };
+    let first = run_simulation(&faulted).expect("faulted scenario runs");
+    let second = run_simulation(&faulted).expect("same seeded scenario runs");
+    let baseline = run_simulation(&control).expect("control scenario runs");
+    assert_eq!(first, second, "seed={SEED}");
+    assert!(first.dropped_messages > 0, "seed={SEED}");
+    assert!(
+        first.completed_at_ms != baseline.completed_at_ms
+            || first.delivered_messages != baseline.delivered_messages,
+        "seed={SEED}: jitter/loss did not change the control outcome"
+    );
+    assert!(
+        first.reordered_deliveries > 0,
+        "seed={SEED}: configured reordering did not invert delivery order"
+    );
+}
+
+#[test]
+fn fixed_jitter_and_certain_loss_change_the_disabled_control() {
+    const SEED: u64 = 0xFA17_0002;
+    let control = SimulationConfig {
+        seed: SEED,
+        node_count: 5,
+        client_count: 12,
+        latency: LatencyDistribution::Fixed(0),
+        ..SimulationConfig::default()
+    };
+    let jittered = run_simulation(&SimulationConfig {
+        jitter: Some(LatencyDistribution::Fixed(25)),
+        ..control.clone()
+    })
+    .expect("jittered scenario runs");
+    let lossy = run_simulation(&SimulationConfig {
+        packet_loss_probability: PACKET_LOSS_SCALE,
+        ..control.clone()
+    })
+    .expect("lossy scenario runs");
+    let baseline = run_simulation(&control).expect("control scenario runs");
+    assert_eq!(
+        jittered.completed_at_ms,
+        baseline.completed_at_ms + 25,
+        "seed={SEED}"
+    );
+    assert_eq!(lossy.delivered_messages, 0, "seed={SEED}");
+    assert_eq!(lossy.dropped_messages, lossy.sent_messages, "seed={SEED}");
+}
+
+#[test]
+fn partition_drops_cross_group_messages_and_heal_restores_delivery() {
+    const SEED: u64 = 0xFA17_0003;
+    let config = SimulationConfig {
+        seed: SEED,
+        node_count: 2,
+        client_count: 40,
+        latency: LatencyDistribution::Uniform {
+            min_ms: 0,
+            max_ms: 40,
+        },
+        partition_schedule: vec![
+            PartitionEvent {
+                at_ms: 0,
+                action: PartitionAction::Split { groups: vec![0, 1] },
+            },
+            PartitionEvent {
+                at_ms: 20,
+                action: PartitionAction::Heal,
+            },
+        ],
+        ..SimulationConfig::default()
+    };
+    let report = run_simulation(&config).expect("partition scenario runs");
+    assert!(report.partition_drops > 0, "seed={SEED}");
+    assert!(
+        report.delivered_messages > 0,
+        "seed={SEED}: heal did not restore delivery"
+    );
+    assert!(
+        report.partition_drops < report.sent_messages,
+        "seed={SEED}: all traffic remained partitioned after heal"
+    );
+}
+
+#[test]
+fn restart_clears_state_while_crash_recovery_and_leave_keep_it() {
+    const SEED: u64 = 0xFA17_0004;
+    let base = SimulationConfig {
+        seed: SEED,
+        node_count: 1,
+        client_count: 1,
+        latency: LatencyDistribution::Fixed(0),
+        malicious_nodes: vec![0],
+        malicious_strategy: MaliciousStrategy::ReplayMessages {
+            replay_after_ms: 20,
+        },
+        ..SimulationConfig::default()
+    };
+    let restarted = run_simulation(&SimulationConfig {
+        lifecycle_schedule: vec![LifecycleEvent {
+            at_ms: 10,
+            node: 0,
+            action: LifecycleAction::Restart,
+        }],
+        ..base.clone()
+    })
+    .expect("restart scenario runs");
+    let recovered = run_simulation(&SimulationConfig {
+        failure_schedule: vec![
+            FailureEvent {
+                at_ms: 10,
+                node: 0,
+                action: FailureAction::Crash,
+            },
+            FailureEvent {
+                at_ms: 15,
+                node: 0,
+                action: FailureAction::Recover,
+            },
+        ],
+        ..base.clone()
+    })
+    .expect("crash-recovery scenario runs");
+    let absent = run_simulation(&SimulationConfig {
+        initially_joined_nodes: Some(Vec::new()),
+        ..base.clone()
+    })
+    .expect("unjoined-node scenario runs");
+    let rejoined = run_simulation(&SimulationConfig {
+        lifecycle_schedule: vec![
+            LifecycleEvent {
+                at_ms: 10,
+                node: 0,
+                action: LifecycleAction::Leave,
+            },
+            LifecycleEvent {
+                at_ms: 15,
+                node: 0,
+                action: LifecycleAction::Join,
+            },
+        ],
+        ..base.clone()
+    })
+    .expect("join-leave-join scenario runs");
+    assert_eq!(restarted.node_restarts, 1, "seed={SEED}");
+    assert_eq!(
+        restarted.restart_reinsertions, VIEW_COUNT,
+        "seed={SEED}: restart did not reinsert the same client identities"
+    );
+    assert_eq!(recovered.restart_reinsertions, 0, "seed={SEED}");
+    assert_eq!(rejoined.restart_reinsertions, 0, "seed={SEED}");
+    assert_eq!(absent.delivered_messages, 0, "seed={SEED}");
+    assert_eq!(absent.dropped_messages, absent.sent_messages, "seed={SEED}");
+    assert_eq!(recovered.delivered_messages, 2 * VIEW_COUNT, "seed={SEED}");
+    assert_eq!(rejoined.delivered_messages, 2 * VIEW_COUNT, "seed={SEED}");
+}
+
+#[test]
+fn bandwidth_and_connection_limits_affect_virtual_delivery() {
+    const SEED: u64 = 0xFA17_0005;
+    let control = SimulationConfig {
+        seed: SEED,
+        node_count: 6,
+        client_count: 24,
+        latency: LatencyDistribution::Fixed(0),
+        ..SimulationConfig::default()
+    };
+    let bandwidth = run_simulation(&SimulationConfig {
+        bandwidth_bytes_per_second: Some(128),
+        ..control.clone()
+    })
+    .expect("bounded-bandwidth scenario runs");
+    let baseline = run_simulation(&control).expect("unlimited-bandwidth scenario runs");
+    assert_eq!(bandwidth.completed_at_ms, 1_000, "seed={SEED}");
+    assert_eq!(baseline.completed_at_ms, 0, "seed={SEED}");
+    let limited = run_simulation(&SimulationConfig {
+        connection_limit: Some(1),
+        ..control
+    })
+    .expect("bounded-connection scenario runs");
+    assert!(limited.rejected_connections > 0, "seed={SEED}");
+    assert!(
+        limited.delivered_messages < limited.sent_messages,
+        "seed={SEED}: connection limit did not reject excess attempts"
+    );
+}
+
+#[test]
+fn byzantine_script_emits_conflicting_signed_states_but_not_a_conflicting_quorum() {
+    const SEED: u64 = 0xFA17_0006;
+    let config = SimulationConfig {
+        seed: SEED,
+        node_count: 5,
+        client_count: 8,
+        latency: LatencyDistribution::Fixed(0),
+        byzantine_scripts: vec![ByzantineScript {
+            node: 0,
+            action: ByzantineAction::SendConflictingAuthorityStates,
+        }],
+        ..SimulationConfig::default()
+    };
+    let report = run_simulation(&config).expect("signed equivocation scenario runs");
+    assert_eq!(report.byzantine_state_messages, 2, "seed={SEED}");
+}
+
+#[test]
+fn byzantine_one_shot_drop_duplicate_and_delay_scripts_are_observable() {
+    const SEED: u64 = 0xFA17_0007;
+    let base = SimulationConfig {
+        seed: SEED,
+        node_count: 1,
+        client_count: 1,
+        latency: LatencyDistribution::Fixed(0),
+        ..SimulationConfig::default()
+    };
+    let dropped = run_simulation(&SimulationConfig {
+        byzantine_scripts: vec![ByzantineScript {
+            node: 0,
+            action: ByzantineAction::DropNext,
+        }],
+        ..base.clone()
+    })
+    .expect("scripted drop scenario runs");
+    let duplicated = run_simulation(&SimulationConfig {
+        byzantine_scripts: vec![ByzantineScript {
+            node: 0,
+            action: ByzantineAction::DuplicateNext,
+        }],
+        ..base.clone()
+    })
+    .expect("scripted duplicate scenario runs");
+    let delayed = run_simulation(&SimulationConfig {
+        byzantine_scripts: vec![ByzantineScript {
+            node: 0,
+            action: ByzantineAction::DelayNext { extra_delay_ms: 12 },
+        }],
+        ..base
+    })
+    .expect("scripted delay scenario runs");
+    assert_eq!(dropped.dropped_messages, 1, "seed={SEED}");
+    assert_eq!(duplicated.duplicate_deliveries, 1, "seed={SEED}");
+    assert_eq!(duplicated.delivered_messages, 4, "seed={SEED}");
+    assert_eq!(delayed.delayed_messages, 1, "seed={SEED}");
+    assert_eq!(delayed.completed_at_ms, 12, "seed={SEED}");
 }

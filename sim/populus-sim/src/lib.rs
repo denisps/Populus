@@ -16,12 +16,16 @@ mod routing;
 mod workload;
 
 pub use config::{
-    ClockSkewDistribution, FailureAction, FailureEvent, LatencyDistribution,
-    MAX_SIMULATION_CLIENTS, MAX_SIMULATION_CONTENTS, MAX_SIMULATION_MESSAGES, MAX_SIMULATION_NODES,
-    MaliciousStrategy, SimulationConfig, SimulationError, VIEW_COUNT,
+    ByzantineAction, ByzantineScript, ClockSkewDistribution, FailureAction, FailureEvent,
+    LatencyDistribution, LifecycleAction, LifecycleEvent, MAX_SIMULATION_CLIENTS,
+    MAX_SIMULATION_CONTENTS, MAX_SIMULATION_MESSAGES, MAX_SIMULATION_NODES, MaliciousStrategy,
+    PACKET_LOSS_SCALE, PartitionAction, PartitionEvent, SIMULATED_PAYLOAD_BYTES, SimulationConfig,
+    SimulationError, VIEW_COUNT,
 };
 pub use engine::run_simulation;
 pub use report::{ContentSummary, SimulationReport, ViewContentSummary};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod virtual_time;

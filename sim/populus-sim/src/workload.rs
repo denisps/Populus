@@ -2,7 +2,7 @@
 //!
 //! Destination selection is only a load generator; it is not delegated-ingest protocol assignment.
 
-use crate::config::{SimulationConfig, SimulationError, VIEW_COUNT};
+use crate::config::{PACKET_LOSS_SCALE, SimulationConfig, SimulationError, VIEW_COUNT};
 use crate::report::ContentSummary;
 use crate::rng::{SeededRandom, random_identifier};
 use populus_content::{ContentBody, SignedContent};
@@ -109,7 +109,15 @@ pub(super) fn schedule_votes(
     config: &SimulationConfig,
     clients: Vec<ClientId>,
     random: &mut SeededRandom,
-    mut schedule: impl FnMut(u64, usize, ClientId, usize, u8) -> Result<(), SimulationError>,
+    mut schedule: impl FnMut(
+        u64,
+        usize,
+        usize,
+        ClientId,
+        usize,
+        u8,
+        bool,
+    ) -> Result<(), SimulationError>,
 ) -> Result<Vec<usize>, SimulationError> {
     let mut expected_by_content = vec![0_usize; config.content_count];
     for (client_index, client_id) in clients.into_iter().enumerate() {
@@ -117,10 +125,40 @@ pub(super) fn schedule_votes(
         expected_by_content[content_index] += 1;
         let destinations = choose_destinations(config.node_count, random)?;
         for (view, node) in destinations.into_iter().enumerate() {
-            let at_ms = config.latency.sample(random);
+            let mut at_ms = config.latency.sample(random);
+            if let Some(jitter) = config.jitter {
+                at_ms = at_ms
+                    .checked_add(jitter.sample(random))
+                    .ok_or(SimulationError::TimeOrSequenceOverflow)?;
+            }
+            if let Some(bytes_per_second) = config.bandwidth_bytes_per_second {
+                let transmission_ms = crate::config::SIMULATED_PAYLOAD_BYTES
+                    .checked_mul(1_000)
+                    .ok_or(SimulationError::TimeOrSequenceOverflow)?
+                    / bytes_per_second;
+                at_ms = at_ms
+                    .checked_add(transmission_ms)
+                    .ok_or(SimulationError::TimeOrSequenceOverflow)?;
+            }
+            if let Some(reorder_delay) = config.reordering {
+                at_ms = at_ms
+                    .checked_add(reorder_delay.sample(random))
+                    .ok_or(SimulationError::TimeOrSequenceOverflow)?;
+            }
+            let loss_dropped = config.packet_loss_probability != 0
+                && random.sample_below(u64::from(PACKET_LOSS_SCALE))
+                    < u64::from(config.packet_loss_probability);
             let view = u8::try_from(view)
                 .map_err(|_| SimulationError::CountLimitExceeded("view count"))?;
-            schedule(at_ms, node, client_id, content_index, view)?;
+            schedule(
+                at_ms,
+                client_index % config.node_count,
+                node,
+                client_id,
+                content_index,
+                view,
+                loss_dropped,
+            )?;
         }
     }
     Ok(expected_by_content)
