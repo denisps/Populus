@@ -208,7 +208,8 @@ pub struct SimulationConfig {
     pub reordering: Option<LatencyDistribution>,
     /// Maximum concurrent peer connections per node; `None` is unlimited.
     pub connection_limit: Option<usize>,
-    /// Per-node bandwidth in bytes per second; `None` is unlimited.
+    /// Per-node egress bandwidth in bytes per second. Messages from one source
+    /// occupy that link serially. `None` is unlimited and does not consume RNG.
     pub bandwidth_bytes_per_second: Option<u64>,
     /// One-shot scripted behaviors for Byzantine nodes.
     pub byzantine_scripts: Vec<ByzantineScript>,

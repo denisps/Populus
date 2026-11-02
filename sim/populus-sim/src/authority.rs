@@ -621,8 +621,7 @@ fn virtual_time_direct_ingest_retries_retargets_and_restores_exact_client_state(
                     expected_estimate,
                     "seed={SEED}: restart discarded the retained client vote"
                 );
-                states.insert(authority_id, restored.clone());
-                states.insert(joiner.authority_id(), restored);
+                states.insert(authority_id, restored);
                 crashed.remove(&authority_id);
                 snapshot_restored = true;
             }
@@ -649,6 +648,14 @@ fn virtual_time_direct_ingest_retries_retargets_and_restores_exact_client_state(
                 assert!(
                     states.contains_key(&crashed),
                     "seed={SEED}: restored original authority state is missing"
+                );
+                let joiner_state = states
+                    .entry(replacement_joiner)
+                    .or_insert_with(|| DirectIngestState::new(content_id, day, policy));
+                assert_eq!(
+                    joiner_state.estimate(),
+                    0.0,
+                    "seed={SEED}: replacement joiner inherited another authority's clients"
                 );
                 for (index, member) in membership.members().iter().copied().enumerate() {
                     let delay = u64::try_from(index + 1).expect("four retry indexes fit");

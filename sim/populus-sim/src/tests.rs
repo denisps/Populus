@@ -3,7 +3,8 @@
 use super::{
     ByzantineAction, ByzantineScript, ClockSkewDistribution, FailureAction, FailureEvent,
     LatencyDistribution, LifecycleAction, LifecycleEvent, MaliciousStrategy, PACKET_LOSS_SCALE,
-    PartitionAction, PartitionEvent, SimulationConfig, SimulationError, VIEW_COUNT, run_simulation,
+    PartitionAction, PartitionEvent, SIMULATED_PAYLOAD_BYTES, SimulationConfig, SimulationError,
+    VIEW_COUNT, run_simulation,
 };
 
 fn small_config() -> SimulationConfig {
@@ -448,7 +449,17 @@ fn bandwidth_and_connection_limits_affect_virtual_delivery() {
     })
     .expect("bounded-bandwidth scenario runs");
     let baseline = run_simulation(&control).expect("unlimited-bandwidth scenario runs");
-    assert_eq!(bandwidth.completed_at_ms, 1_000, "seed={SEED}");
+    let messages_per_source = control.client_count / control.node_count * VIEW_COUNT;
+    let transmission_ms = SIMULATED_PAYLOAD_BYTES * 1_000 / 128;
+    assert_eq!(
+        bandwidth.completed_at_ms,
+        u64::try_from(messages_per_source).expect("message count fits") * transmission_ms,
+        "seed={SEED}: egress bandwidth did not serialize concurrent sends"
+    );
+    assert_eq!(
+        bandwidth.delivered_messages, baseline.delivered_messages,
+        "seed={SEED}"
+    );
     assert_eq!(baseline.completed_at_ms, 0, "seed={SEED}");
     let limited = run_simulation(&SimulationConfig {
         connection_limit: Some(1),
