@@ -13,6 +13,25 @@ standard test, coverage, dependency, and gate workflows:
 cargo xtask setup
 ```
 
+Setup checks `cargo-nextest`, `cargo-llvm-cov`, `cargo-machete`, and `cargo-deny`
+against the versions pinned in `xtask`, then includes only missing or mismatched
+tools in one `cargo install --locked --profile dev` invocation. It also checks
+`rustfmt` (for `cargo fmt`), `clippy`, and `llvm-tools-preview` (for coverage) for
+the active Rust toolchain and installs missing components together using
+`rustup component add`. If everything is ready, no installer runs.
+Tool builds are unoptimized, with debug information and incremental compilation
+disabled.
+Build artifacts are shared in the ignored repository-local `.cache/populus-tools/`
+directory, which survives `cargo clean` and can be deleted to reclaim space.
+Binaries are installed to Cargo's normal installation directory (usually
+`~/.cargo/bin`), which must be on `PATH`.
+
+Both gates check all four pinned tool versions and all three Rust components
+before running any checks. Missing or mismatched tools cause an error directing
+you to `cargo xtask setup`; gates never invoke installers. The formatting, lint,
+test, coverage, and dependency commands likewise check their required tools
+without installing them.
+
 The repository's `rust-toolchain.toml` selects stable Rust and the required
 components; rustup installs them automatically when needed.
 
