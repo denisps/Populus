@@ -69,7 +69,9 @@ fn run(root: &Path, arguments: &[String]) -> Result<(), String> {
 }
 
 fn setup(root: &Path) -> Result<(), String> {
-    let missing = missing_components(&installed_components(root)?, &RUST_COMPONENTS);
+    let installed = installed_components(root)?;
+    let host = active_host_target(root)?;
+    let missing = missing_components(&installed, &RUST_COMPONENTS, &host);
     if let Some(command) = component_setup_command(root, &missing) {
         run_setup_command(command)?;
     }
@@ -143,12 +145,34 @@ fn installed_components(root: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn missing_components<'a>(installed: &str, components: &[&'a str]) -> Vec<&'a str> {
+fn active_host_target(root: &Path) -> Result<String, String> {
+    let output = Command::new("rustc")
+        .arg("-vV")
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("could not inspect active Rust host target: {error}"))?;
+    require_success(&output, "rustc -vV")?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .map(str::to_owned)
+        .ok_or_else(|| "rustc -vV did not report the active host target".to_owned())
+}
+
+fn missing_components<'a>(
+    installed: &str,
+    components: &[&'a str],
+    host_target: &str,
+) -> Vec<&'a str> {
+    let host_llvm_tools = format!("llvm-tools-{host_target}");
     components
         .iter()
         .copied()
         .filter(|component| {
-            // Rustup lists llvm-tools-preview under its canonical name, llvm-tools.
+            if *component == "llvm-tools-preview" {
+                return !installed.lines().any(|line| line == host_llvm_tools);
+            }
+            // Rustup lists preview components under their canonical names.
             let name = component.trim_end_matches("-preview");
             !installed.lines().any(|line| {
                 line == name
@@ -161,7 +185,9 @@ fn missing_components<'a>(installed: &str, components: &[&'a str]) -> Vec<&'a st
 }
 
 fn require_components(root: &Path, components: &[&str]) -> Result<(), String> {
-    let missing = missing_components(&installed_components(root)?, components);
+    let installed = installed_components(root)?;
+    let host = active_host_target(root)?;
+    let missing = missing_components(&installed, components, &host);
     require_available(
         &missing
             .iter()
@@ -178,9 +204,13 @@ fn require_development_tools(root: &Path) -> Result<(), String> {
     .map(|(tool, version)| format!("cargo-{tool}@{version}"))
     .collect();
     missing.extend(
-        missing_components(&installed_components(root)?, &RUST_COMPONENTS)
-            .iter()
-            .map(|name| format!("Rust component {name}")),
+        missing_components(
+            &installed_components(root)?,
+            &RUST_COMPONENTS,
+            &active_host_target(root)?,
+        )
+        .iter()
+        .map(|name| format!("Rust component {name}")),
     );
     require_available(&missing)
 }

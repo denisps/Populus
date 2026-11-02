@@ -33,14 +33,18 @@ fn setup_installs_all_pinned_tools_in_one_unoptimized_command() -> Result<(), St
     assert_eq!(command.get_program(), "cargo");
     let arguments: Vec<_> = command.get_args().collect();
     assert_eq!(
-        arguments,
+        &arguments[..5],
+        ["install", "--locked", "--profile", "dev", "--target-dir"]
+    );
+    assert_eq!(
+        arguments[5],
+        Path::new("/workspace")
+            .join(".cache/populus-tools")
+            .as_os_str()
+    );
+    assert_eq!(
+        &arguments[6..],
         [
-            "install",
-            "--locked",
-            "--profile",
-            "dev",
-            "--target-dir",
-            "/workspace/.cache/populus-tools",
             "cargo-nextest@0.9.148",
             "cargo-llvm-cov@0.9.1",
             "cargo-machete@0.9.2",
@@ -88,7 +92,8 @@ fn setup_only_installs_missing_or_incorrect_cargo_tools() -> Result<(), String> 
 fn setup_checks_toolchain_components_and_installs_only_missing_ones() -> Result<(), String> {
     let installed =
         "cargo-aarch64-apple-darwin\nclippy-aarch64-apple-darwin\nrustfmt-aarch64-apple-darwin\n";
-    let missing = missing_components(installed, &RUST_COMPONENTS);
+    let host = "x86_64-unknown-linux-gnu";
+    let missing = missing_components(installed, &RUST_COMPONENTS, host);
     assert_eq!(missing, ["llvm-tools-preview"]);
     let command =
         component_setup_command(Path::new("/workspace"), &missing).ok_or("missing component")?;
@@ -99,21 +104,37 @@ fn setup_checks_toolchain_components_and_installs_only_missing_ones() -> Result<
     );
     assert_eq!(command.get_current_dir(), Some(Path::new("/workspace")));
 
-    let all_installed = format!("{installed}llvm-tools-aarch64-apple-darwin\n");
-    let ready = missing_components(&all_installed, &RUST_COMPONENTS);
+    let all_installed = format!("{installed}llvm-tools-{host}\n");
+    let ready = missing_components(&all_installed, &RUST_COMPONENTS, host);
     assert_eq!(ready, Vec::<&str>::new());
     assert!(component_setup_command(Path::new("/workspace"), &ready).is_none());
-    assert_eq!(missing_components("", &RUST_COMPONENTS), RUST_COMPONENTS);
     assert_eq!(
-        missing_components("rustfmtish\nclippyish\nllvm-toolset\n", &RUST_COMPONENTS),
+        missing_components("", &RUST_COMPONENTS, host),
+        RUST_COMPONENTS
+    );
+    assert_eq!(
+        missing_components(
+            "rustfmtish\nclippyish\nllvm-toolset\n",
+            &RUST_COMPONENTS,
+            host
+        ),
         RUST_COMPONENTS
     );
     assert_eq!(
         missing_components(
             "rustfmt-x86_64-unknown-linux-gnu\nclippy-x86_64-unknown-linux-gnu\nllvm-tools-x86_64-unknown-linux-gnu\n",
-            &RUST_COMPONENTS
+            &RUST_COMPONENTS,
+            host
         ),
         Vec::<&str>::new()
+    );
+    assert_eq!(
+        missing_components(
+            "rustfmt-x86_64-unknown-linux-gnu\nclippy-x86_64-unknown-linux-gnu\nllvm-tools-aarch64-apple-darwin\n",
+            &RUST_COMPONENTS,
+            host
+        ),
+        ["llvm-tools-preview"]
     );
     Ok(())
 }
