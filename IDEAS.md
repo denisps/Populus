@@ -63,3 +63,10 @@
   in the Phase 16 scenarios before any v2 identity change. Over-merging is
   the accepted v1 cost; the open question is how often one account can buy
   multiple `/48`s.
+- Define a versioned application envelope before any non-vote message shares
+  the request-response stream. The node currently decodes every inbound
+  request as a `DirectVote` and drops the raw bytes on failure. The first
+  shared encoding should be a bounded version tag plus payload, reject
+  unknown versions as typed errors, and leave successful events typed. Do
+  not freeze those bytes until the first authority message exists; until
+  then, do not invent a parallel envelope in the transport adapter.
