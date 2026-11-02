@@ -767,10 +767,14 @@ Realtime counts are provisional. A persistent local like retries its pending
 daily vote until it receives a valid signed acknowledgement from each of the
 four authorities in the pinned membership view. A replacement membership
 generation re-targets the same pending vote and invalidates prior-view
-acknowledgements; duplicate delivery remains idempotent. The client skips fully
-offline days rather than backfilling them, and stops issuing future votes after
-unlike. Each authority snapshot
-stores the bounded encoding fixed by `testvectors/direct-ingest-v1.txt`:
+acknowledgements; duplicate delivery remains idempotent. The client retains an
+unacknowledged vote through the following UTC day, when grace and skew may
+still permit acceptance, then discards it on returning two or more days later
+and votes only for the current day. Direct-ingest policy bounds the combined
+grace and skew allowance to one day, so the expired vote cannot still be
+accepted. The client stops issuing future votes after unlike. Each authority
+snapshot stores the bounded encoding fixed by
+`testvectors/direct-ingest-v1.txt`:
 
 ```text
 "PDIR" || version=1 || ContentId[36] || UtcDay[i64be]

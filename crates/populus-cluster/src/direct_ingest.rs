@@ -11,6 +11,7 @@ use std::{collections::BTreeSet, fmt};
 const STATE_HEADER: [u8; 4] = *b"PDIR";
 const STATE_VERSION: u8 = 1;
 const RATE_WINDOW_MS: i64 = 60_000;
+const MAX_BOUNDARY_ALLOWANCE_MS: u64 = 86_400_000;
 
 /// Default desired maximum direct rate for each authority, in votes per minute.
 pub const DEFAULT_MAX_DIRECT_VOTES_PER_MINUTE: u64 = 1_000;
@@ -43,13 +44,18 @@ impl DirectIngestPolicy {
     ///
     /// # Errors
     ///
-    /// Returns [`DirectIngestError::InvalidPolicy`] when the rate target is zero.
+    /// Returns [`DirectIngestError::InvalidPolicy`] when the rate target is
+    /// zero or the combined close-grace and clock-skew allowance exceeds one
+    /// UTC day.
     pub fn new(
         max_direct_votes_per_minute: u64,
         close_grace_period_ms: u64,
         max_clock_skew_ms: u64,
     ) -> Result<Self, DirectIngestError> {
-        if max_direct_votes_per_minute == 0 {
+        let boundary_allowance_is_bounded = close_grace_period_ms
+            .checked_add(max_clock_skew_ms)
+            .is_some_and(|allowance| allowance <= MAX_BOUNDARY_ALLOWANCE_MS);
+        if max_direct_votes_per_minute == 0 || !boundary_allowance_is_bounded {
             return Err(DirectIngestError::InvalidPolicy);
         }
         Ok(Self {
@@ -164,8 +170,10 @@ impl DirectVote {
 /// Persistent local like state that issues at most one vote per UTC day.
 ///
 /// The pending vote is returned unchanged for retries until every authority in
-/// the pinned membership acknowledges it, even if the client returns on a
-/// later day. Replacements advance the pending vote to the new membership
+/// the pinned membership acknowledges it, even if the client returns on the
+/// following UTC day. A pending vote is discarded once the client returns at
+/// least two days later, when the bounded acceptance allowance is guaranteed
+/// closed. Replacements advance the pending vote to the new membership
 /// generation and restart its acknowledgement set. Once no vote is pending, a
 /// client returning after offline days creates a vote only for the current day.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,7 +349,10 @@ impl PersistentLike {
     ///
     /// The membership view pins the four direct recipients for this vote.
     /// A newer membership generation re-targets the pending vote and clears
-    /// acknowledgements from the previous authority set.
+    /// acknowledgements from the previous authority set. Pending votes expire
+    /// when the current day is at least two days after the vote day; the
+    /// policy's one-day boundary-allowance bound guarantees they can no longer
+    /// be accepted.
     ///
     /// # Errors
     ///
@@ -360,6 +371,13 @@ impl PersistentLike {
         }
         if membership.routing_key() != routing_key(RoutingIdentifier::Content(&self.content_id)) {
             return Err(DirectIngestError::WrongMembership);
+        }
+        let pending_vote_expired = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| day.value() > pending.vote.day.value().saturating_add(1));
+        if pending_vote_expired {
+            self.pending = None;
         }
         if let Some(pending) = &mut self.pending {
             let expected_authorities: BTreeSet<_> = membership
@@ -908,7 +926,7 @@ impl<'a> StateCursor<'a> {
 /// Errors encountered while validating or applying a direct vote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectIngestError {
-    /// A policy cannot have a zero direct-rate target.
+    /// A policy has a zero direct-rate target or an excessive boundary allowance.
     InvalidPolicy,
     /// The vote belongs to another immutable content item.
     WrongContent,
@@ -943,7 +961,9 @@ pub enum DirectIngestError {
 impl fmt::Display for DirectIngestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidPolicy => formatter.write_str("direct-ingest rate target must be nonzero"),
+            Self::InvalidPolicy => formatter.write_str(
+                "direct-ingest rate target must be nonzero and combined boundary allowances must not exceed one UTC day",
+            ),
             Self::WrongContent => formatter.write_str("vote belongs to another content item"),
             Self::WrongDay => formatter.write_str("vote belongs to another UTC day"),
             Self::WrongMembership => {

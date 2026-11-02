@@ -17,6 +17,7 @@ fuzz_target!(|input: &[u8]| {
 });
 
 fn decode_hex_seed(input: &[u8]) -> Option<Vec<u8>> {
+    let input = input.trim_ascii_end();
     if input.len() > 2 * 1_048_576 || input.len() % 2 != 0 {
         return None;
     }

@@ -97,6 +97,20 @@ fn duplicate_retries_are_idempotent_and_rate_target_is_advisory() {
 }
 
 #[test]
+fn direct_ingest_policy_bounds_boundary_allowance_to_one_day() {
+    let one_day_ms = u64::try_from(DAY_MS).expect("day duration is positive");
+    assert!(DirectIngestPolicy::new(1, one_day_ms - 1, 1).is_ok());
+    assert_eq!(
+        DirectIngestPolicy::new(1, one_day_ms, 1),
+        Err(DirectIngestError::InvalidPolicy)
+    );
+    assert_eq!(
+        DirectIngestPolicy::new(1, u64::MAX, 1),
+        Err(DirectIngestError::InvalidPolicy)
+    );
+}
+
+#[test]
 fn vote_scope_and_authority_clock_window_are_validated() {
     let content_id = content(2);
     let day = UtcDay::new(4);
@@ -256,6 +270,38 @@ fn persistent_like_retries_until_ack_and_skips_days_offline() {
         like.vote_when_online(client(9), UtcDay::new(12), &replacement),
         Ok(None)
     );
+    assert_eq!(
+        like.acknowledge(&first_ack, &membership),
+        Err(DirectIngestError::UnexpectedAcknowledgement)
+    );
+}
+
+#[test]
+fn persistent_like_expires_partially_acknowledged_vote_after_two_days() {
+    let content_id = content(6);
+    let vote_day = UtcDay::new(10);
+    let current_day = UtcDay::new(12);
+    let (membership, keys) = make_membership(content_id, 1, 0);
+    let mut like = PersistentLike::new(content_id, true);
+    let pending = like
+        .vote_when_online(client(9), vote_day, &membership)
+        .expect("membership matches the content")
+        .expect("online liked client emits today's vote");
+    let first_ack = signed_ack(pending, &membership, &keys, 0);
+    assert!(
+        !like
+            .acknowledge(&first_ack, &membership)
+            .expect("first authority is in the pinned membership")
+    );
+    assert_eq!(like.pending_authorities().len(), 3);
+
+    let current = like
+        .vote_when_online(client(9), current_day, &membership)
+        .expect("membership matches the content")
+        .expect("expired pending vote gives way to the current day's vote");
+    assert_eq!(current.day(), current_day);
+    assert_ne!(current, pending);
+    assert_eq!(like.pending_authorities().len(), 4);
     assert_eq!(
         like.acknowledge(&first_ack, &membership),
         Err(DirectIngestError::UnexpectedAcknowledgement)

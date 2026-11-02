@@ -930,12 +930,16 @@ All four authorities consume the same client-selected daily epoch, insert
 validated `ClientId`s idempotently into their own `ClientSketch`, and replicate
 the versioned bounded snapshot through Phase 7 state. Clients retry a pending
 vote until all four authorities in the pinned membership view return valid
-signed acknowledgements; a membership replacement re-targets the same vote.
-After being offline, clients vote only for the current day. Configurable close
-grace and clock-skew allowances keep boundary-delayed votes provisional before
-finalization. Exceeding the configurable direct-rate target recommends
-delegation but does not discard votes; assignment and delegated-ingest
-transitions remain owned by Phases 9-10.
+signed acknowledgements or the vote expires; a membership replacement
+re-targets the same vote. Clients retry through the following UTC day, then
+discard a still-pending vote when returning two or more days later and vote
+only for the current day. The combined configurable close-grace and clock-skew
+allowance is bounded to one day so this expiry cannot discard a vote that
+authorities could still accept.
+Configurable close grace and clock-skew allowances keep boundary-delayed votes
+provisional before finalization. Exceeding the configurable direct-rate target
+recommends delegation but does not discard votes; assignment and delegated-
+ingest transitions remain owned by Phases 9-10.
 
 The canonical daily-bucket hash and authority snapshot bytes are fixed by
 `testvectors/daily-vote-v1.txt` and `testvectors/direct-ingest-v1.txt`.
