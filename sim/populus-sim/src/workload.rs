@@ -128,29 +128,29 @@ pub(super) fn schedule_votes(
         expected_by_content[content_index] += 1;
         let destinations = choose_destinations(config.node_count, random)?;
         for (view, node) in destinations.into_iter().enumerate() {
-            let mut at_ms = config.latency.sample(random);
+            let mut latency_ms = config.latency.sample(random);
             if let Some(jitter) = config.jitter {
-                at_ms = at_ms
+                latency_ms = latency_ms
                     .checked_add(jitter.sample(random))
                     .ok_or(SimulationError::TimeOrSequenceOverflow)?;
             }
+            let mut at_ms = 0_u64;
             if let Some(bytes_per_second) = config.bandwidth_bytes_per_second {
                 let ticks_per_ms = u128::from(bytes_per_second);
-                let ready_ticks = u128::from(at_ms)
-                    .checked_mul(ticks_per_ms)
-                    .ok_or(SimulationError::TimeOrSequenceOverflow)?;
                 let source = client_index % config.node_count;
                 let transmission_ticks = u128::from(crate::config::SIMULATED_PAYLOAD_BYTES)
                     .checked_mul(1_000)
                     .ok_or(SimulationError::TimeOrSequenceOverflow)?;
-                let finish_ticks = ready_ticks
-                    .max(egress_free_ticks[source])
+                let finish_ticks = egress_free_ticks[source]
                     .checked_add(transmission_ticks)
                     .ok_or(SimulationError::TimeOrSequenceOverflow)?;
                 egress_free_ticks[source] = finish_ticks;
                 at_ms = u64::try_from(finish_ticks.div_ceil(ticks_per_ms))
                     .map_err(|_| SimulationError::TimeOrSequenceOverflow)?;
             }
+            at_ms = at_ms
+                .checked_add(latency_ms)
+                .ok_or(SimulationError::TimeOrSequenceOverflow)?;
             if let Some(reorder_delay) = config.reordering {
                 at_ms = at_ms
                     .checked_add(reorder_delay.sample(random))

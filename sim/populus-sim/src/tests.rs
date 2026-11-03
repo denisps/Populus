@@ -6,6 +6,7 @@ use super::{
     PartitionAction, PartitionEvent, SIMULATED_PAYLOAD_BYTES, SimulationConfig, SimulationError,
     VIEW_COUNT, run_simulation,
 };
+use populus_types::ClientId;
 
 fn small_config() -> SimulationConfig {
     SimulationConfig {
@@ -507,6 +508,42 @@ fn bandwidth_and_connection_limits_affect_virtual_delivery() {
     assert!(
         limited.delivered_messages < limited.sent_messages,
         "seed={SEED}: connection limit did not reject excess attempts"
+    );
+}
+
+#[test]
+fn packet_latency_does_not_delay_later_egress_reservations() {
+    const SEED: u64 = 2;
+    let config = SimulationConfig {
+        seed: SEED,
+        node_count: 1,
+        client_count: 1,
+        content_count: 1,
+        latency: LatencyDistribution::Uniform {
+            min_ms: 0,
+            max_ms: 5_000,
+        },
+        bandwidth_bytes_per_second: Some(128_000_000),
+        ..SimulationConfig::default()
+    };
+    let mut random = crate::rng::SeededRandom::new(SEED);
+    let mut delivery_times = Vec::new();
+    let expected_by_content = crate::workload::schedule_votes(
+        &config,
+        vec![ClientId::from_bytes([1; 32])],
+        &mut random,
+        |at_ms, _, _, _, _, _, _| {
+            delivery_times.push(at_ms);
+            Ok(())
+        },
+    )
+    .expect("scheduled votes fit the virtual timeline");
+
+    assert_eq!(expected_by_content, [1]);
+    assert_eq!(
+        delivery_times,
+        [4_534, 568, 587],
+        "seed={SEED}: one high-latency packet delayed later egress"
     );
 }
 
