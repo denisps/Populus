@@ -188,6 +188,57 @@ pub fn select_authorities(
         .collect())
 }
 
+/// Replaces one current authority with the closest known member outside the view.
+///
+/// The three non-departing authorities are retained, and the resulting view is
+/// ordered canonically by XOR distance to its routing key.
+///
+/// # Errors
+///
+/// Returns [`AuthorityError::NotAMember`] if `departed` is not in the current
+/// view, [`AuthorityError::NoReplacementMember`] if no known outsider can join,
+/// or [`AuthorityError::MembershipGenerationOverflow`] if the generation cannot
+/// be incremented.
+pub fn replace_authority(
+    previous: &MembershipView,
+    departed: AuthorityId,
+    known_members: &[AuthorityMember],
+) -> Result<MembershipView, AuthorityError> {
+    let _ = select_authorities(&previous.routing_key, known_members)?;
+    if previous.member(departed).is_none() {
+        return Err(AuthorityError::NotAMember);
+    }
+    let generation = previous
+        .generation
+        .checked_add(1)
+        .ok_or(AuthorityError::MembershipGenerationOverflow)?;
+
+    let outsiders = known_members
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            !previous.members.iter().any(|member| {
+                candidate.node_id == member.node_id || candidate.authority_id == member.authority_id
+            })
+        })
+        .collect::<Vec<_>>();
+    let joiner = select_authorities(&previous.routing_key, &outsiders)?
+        .first()
+        .copied()
+        .ok_or(AuthorityError::NoReplacementMember)?;
+
+    let retained = previous
+        .members
+        .iter()
+        .copied()
+        .filter(|member| member.authority_id != departed)
+        .collect::<Vec<_>>();
+    let mut members = retained;
+    members.push(joiner);
+    let members = select_authorities(&previous.routing_key, &members)?;
+    MembershipView::new(previous.routing_key, generation, members)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct RankedMember {
     distance: XorDistance,
@@ -941,8 +992,12 @@ pub enum AuthorityError {
     NonCanonicalMembership,
     /// A signer key is not a valid Ed25519 public key.
     InvalidPublicKey,
-    /// A signing key is not represented by the expected membership.
+    /// The supplied authority is not represented by the expected membership.
     NotAMember,
+    /// No eligible known authority exists to replace the departed member.
+    NoReplacementMember,
+    /// The membership generation cannot be incremented.
+    MembershipGenerationOverflow,
     /// A response signer is not an expected cluster member.
     UnknownResponder,
     /// A signed state or membership belongs to a different routing key.
@@ -982,7 +1037,9 @@ impl std::fmt::Display for AuthorityError {
                 "authority membership is not in canonical distance order"
             }
             Self::InvalidPublicKey => "invalid authority public key",
-            Self::NotAMember => "signer is not in the authority membership",
+            Self::NotAMember => "authority is not in the expected membership",
+            Self::NoReplacementMember => "no known authority can replace the departed member",
+            Self::MembershipGenerationOverflow => "authority membership generation overflow",
             Self::UnknownResponder => "unknown authority state responder",
             Self::StaleRequest => "authority state request is stale or replayed",
             Self::UnexpectedOrDuplicateResponse => {

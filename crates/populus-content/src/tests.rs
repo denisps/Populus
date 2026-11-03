@@ -111,6 +111,18 @@ fn producer_signatures_verify_and_modified_body_is_rejected() {
 }
 
 #[test]
+fn duplicate_producer_ids_in_a_body_are_rejected() {
+    let producer_id = key(6).producer_id();
+    let mut body = ContentBody::new(10, "text/plain", b"duplicate producer".to_vec());
+    body.producers = vec![producer_id, producer_id];
+
+    assert!(matches!(
+        SignedContent::new(body, Vec::new()),
+        Err(ContentError::DuplicateItems)
+    ));
+}
+
+#[test]
 fn multiple_producers_sign_the_same_canonical_body() {
     let first = key(1);
     let second = key(2);
@@ -159,6 +171,53 @@ fn mutable_revision_chain_is_immutable_and_monotonic() {
     assert_eq!(
         invalid.validate_successor(&genesis),
         Err(ContentError::InvalidRevisionChain)
+    );
+
+    let rollback = MutableRevision {
+        sequence: 0,
+        previous_revision: Some(next.cid().expect("next revision cid")),
+        ..next.clone()
+    };
+    assert_eq!(
+        rollback.validate_successor(&next),
+        Err(ContentError::InvalidRevisionChain)
+    );
+}
+
+#[test]
+fn distinct_mutable_revisions_can_follow_the_same_predecessor() {
+    let genesis = MutableRevision::genesis(
+        SignedContent::new(
+            ContentBody::new(1, "text/plain", b"genesis".to_vec()),
+            Vec::new(),
+        )
+        .expect("anonymous genesis"),
+    )
+    .expect("genesis revision");
+    let first = MutableRevision::next(
+        &genesis,
+        SignedContent::new(
+            ContentBody::new(2, "text/plain", b"first successor".to_vec()),
+            Vec::new(),
+        )
+        .expect("anonymous first successor"),
+    )
+    .expect("first successor");
+    let second = MutableRevision::next(
+        &genesis,
+        SignedContent::new(
+            ContentBody::new(3, "text/plain", b"second successor".to_vec()),
+            Vec::new(),
+        )
+        .expect("anonymous second successor"),
+    )
+    .expect("second successor");
+
+    assert!(first.validate_successor(&genesis).is_ok());
+    assert!(second.validate_successor(&genesis).is_ok());
+    assert_ne!(
+        first.cid().expect("first successor cid"),
+        second.cid().expect("second successor cid")
     );
 }
 

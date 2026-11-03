@@ -25,6 +25,27 @@ fn sketch_for(seed: u64, count: u64) -> ClientSketch {
     sketch
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the reference rank is bounded by the 64-bit hash width"
+)]
+fn reference_register_values(ids: impl IntoIterator<Item = ClientId>) -> Vec<u8> {
+    let mut expected = vec![0; REGISTER_COUNT];
+    for id in ids {
+        let bytes = id.to_bytes();
+        let hash = u64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
+        let register_index = (hash >> 50) as usize;
+        let remainder = hash & ((1_u64 << 50) - 1);
+        let rank = (0_u8..50)
+            .find(|bit| remainder & (1_u64 << (49 - *bit)) != 0)
+            .map_or(51_u8, |leading_zeroes| leading_zeroes + 1);
+        expected[register_index] = expected[register_index].max(rank);
+    }
+    expected
+}
+
 #[test]
 fn hll_001_duplicate_client_insert_is_idempotent() {
     let mut sketch = ClientSketch::new();
@@ -43,37 +64,37 @@ fn hll_001_duplicate_client_insert_is_idempotent() {
     reason = "this test population is fixed at 257"
 )]
 fn promotion_retains_population_estimate_within_hll_error() {
-    let sketch = sketch_for(11, (SPARSE_LIMIT + 1) as u64);
+    let ids = (0..=(SPARSE_LIMIT as u64))
+        .map(|index| client_id(11, index))
+        .collect::<Vec<_>>();
+    let expected_registers = reference_register_values(ids.iter().copied());
+    let mut sketch = ClientSketch::new();
+    let mut same_population = ClientSketch::new();
+    for id in &ids {
+        sketch.insert(*id);
+    }
+    for id in ids.iter().rev() {
+        same_population.insert(*id);
+    }
+
     assert!(
         (sketch.estimate() - (SPARSE_LIMIT + 1) as f64).abs() < 20.0,
         "estimate={}",
         sketch.estimate()
     );
+    assert_eq!(sketch.registers().collect::<Vec<_>>(), expected_registers);
+    assert_eq!(sketch.serialize(), same_population.serialize());
     assert_eq!(sketch.registers().len(), REGISTER_COUNT);
     assert_eq!(sketch.memory_usage(), REGISTER_COUNT * 6 / 8);
     assert_eq!(sketch.register(REGISTER_COUNT), None);
 }
 
 #[test]
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "the reference rank is bounded by the 64-bit hash width"
-)]
 fn register_values_match_independent_reference_calculation() {
     let mut sketch = ClientSketch::new();
-    let mut expected = vec![0; REGISTER_COUNT];
-    for index in 0..2_000 {
-        let id = client_id(9, index);
-        let bytes = id.to_bytes();
-        let hash = u64::from_be_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]);
-        let register_index = (hash >> 50) as usize;
-        let remainder = hash & ((1_u64 << 50) - 1);
-        let rank = (0_u8..50)
-            .find(|bit| remainder & (1_u64 << (49 - *bit)) != 0)
-            .map_or(51_u8, |leading_zeroes| leading_zeroes + 1);
-        expected[register_index] = expected[register_index].max(rank);
+    let ids = (0..2_000).map(|index| client_id(9, index));
+    let expected = reference_register_values(ids.clone());
+    for id in ids {
         sketch.insert(id);
     }
     assert_eq!(sketch.registers().collect::<Vec<_>>(), expected);
@@ -232,7 +253,7 @@ fn estimates_match_exact_oracle_at_small_cardinalities() {
 )]
 fn dense_estimates_stay_within_statistical_bounds_for_seeded_populations() {
     for seed in 0..8 {
-        for count in [1_000_u64, 10_000] {
+        for count in [1_000_u64, 10_000, 100_000] {
             let sketch = sketch_for(seed, count);
             let relative_error = (sketch.estimate() - count as f64).abs() / count as f64;
             assert!(
@@ -243,13 +264,15 @@ fn dense_estimates_stay_within_statistical_bounds_for_seeded_populations() {
         }
     }
 
-    let sketch = sketch_for(22, 1_000_000);
-    let relative_error = (sketch.estimate() - 1_000_000.0).abs() / 1_000_000.0;
-    assert!(
-        relative_error < 0.04,
-        "count=1000000, estimate={}, relative_error={relative_error}",
-        sketch.estimate()
-    );
+    for seed in [22, 23, 24] {
+        let sketch = sketch_for(seed, 1_000_000);
+        let relative_error = (sketch.estimate() - 1_000_000.0).abs() / 1_000_000.0;
+        assert!(
+            relative_error < 0.04,
+            "seed={seed}, count=1000000, estimate={}, relative_error={relative_error}",
+            sketch.estimate()
+        );
+    }
 }
 
 #[test]

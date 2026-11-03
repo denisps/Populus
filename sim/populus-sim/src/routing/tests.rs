@@ -1,6 +1,9 @@
+#![allow(clippy::expect_used)]
+
 use std::collections::BTreeMap;
 
 use crate::rng::{SeededRandom, random_identifier};
+use crate::virtual_time::VirtualTime;
 use populus_routing::{
     BUCKET_CAPACITY, BUCKET_COUNT, InsertError, RoutingTable, closest_nodes_brute_force,
 };
@@ -15,6 +18,7 @@ fn phase_4_routing_lifecycle_scales_cover_joins_leaves_churn_partitions_and_reco
         for index in 0..node_count {
             network.join(index);
         }
+
         network.assert_routing_invariants("after joins");
 
         let leaves: Vec<_> = (0..node_count).filter(|index| index % 5 == 1).collect();
@@ -57,6 +61,124 @@ fn phase_4_routing_lifecycle_scales_cover_joins_leaves_churn_partitions_and_reco
         }
         network.assert_routing_invariants("after node recovery");
     }
+}
+
+#[test]
+fn modest_routing_lifecycle_uses_virtual_time_and_brute_force_oracle() {
+    const SEED: u64 = 0x5048_4153_4535;
+    let mut random = SeededRandom::new(SEED);
+    let ids: Vec<_> = (0..24)
+        .map(|index| {
+            NodeId::from_bytes(random_identifier(
+                &mut random,
+                u64::try_from(index).expect("small node index fits"),
+            ))
+        })
+        .collect();
+    let mut tables = [RoutingTable::new(ids[0]), RoutingTable::new(ids[1])];
+    let mut alive = vec![false; ids.len()];
+    let groups: Vec<_> = (0..ids.len()).map(|index| index % 2).collect();
+    let mut partitioned = false;
+    let mut clock = VirtualTime::new();
+    for node in 0..ids.len() {
+        clock
+            .schedule(
+                u64::try_from(node).expect("small virtual timestamp fits"),
+                RoutingLifecycleEvent::Join(node),
+            )
+            .expect("join event is not in the past");
+    }
+    clock
+        .schedule(20, RoutingLifecycleEvent::Leave(7))
+        .expect("leave");
+    clock
+        .schedule(25, RoutingLifecycleEvent::Partition)
+        .expect("partition");
+    clock
+        .schedule(30, RoutingLifecycleEvent::Heal)
+        .expect("heal");
+
+    while let Some((_at_ms, event)) = clock.next() {
+        let previous_sizes = tables.each_ref().map(RoutingTable::len);
+        match event {
+            RoutingLifecycleEvent::Join(node) => alive[node] = true,
+            RoutingLifecycleEvent::Leave(node) => alive[node] = false,
+            RoutingLifecycleEvent::Partition => partitioned = true,
+            RoutingLifecycleEvent::Heal => partitioned = false,
+        }
+        reconcile_routing_contacts(&mut tables, &ids, &alive, &groups, partitioned, SEED);
+        if matches!(event, RoutingLifecycleEvent::Partition) {
+            assert!(
+                tables
+                    .iter()
+                    .zip(previous_sizes)
+                    .all(|(table, before)| table.len() < before),
+                "seed={SEED}: partition did not remove cross-component contacts"
+            );
+        }
+        for (table_index, table) in tables.iter().enumerate() {
+            let contacts: Vec<_> = table.known_nodes().copied().collect();
+            let expected: Vec<_> = ids
+                .iter()
+                .enumerate()
+                .filter(|(index, id)| {
+                    alive[*index]
+                        && **id != table.local_node()
+                        && (!partitioned || groups[*index] == table_index)
+                })
+                .map(|(_, id)| *id)
+                .collect();
+            assert_eq!(contacts.len(), expected.len(), "seed={SEED}");
+            for target in [
+                RoutingKey::from_bytes([0x21; 32]),
+                RoutingKey::from_bytes([0x82; 32]),
+            ] {
+                assert_eq!(
+                    table.closest_nodes(&target, 7),
+                    closest_nodes_brute_force(&target, &expected, 7),
+                    "seed={SEED}: nearest lookup disagreed with the retained-contact oracle"
+                );
+            }
+        }
+    }
+    assert_eq!(clock.now_ms(), 30, "seed={SEED}");
+}
+
+fn reconcile_routing_contacts(
+    tables: &mut [RoutingTable; 2],
+    ids: &[NodeId],
+    alive: &[bool],
+    groups: &[usize],
+    partitioned: bool,
+    seed: u64,
+) {
+    for (table_index, table) in tables.iter_mut().enumerate() {
+        for node in 0..ids.len() {
+            let should_retain = alive[node] && (!partitioned || groups[node] == table_index);
+            if should_retain {
+                match table.insert(ids[node]) {
+                    Ok(())
+                    | Err(
+                        InsertError::LocalNode | InsertError::Duplicate | InsertError::BucketFull,
+                    ) => {}
+                }
+            } else {
+                table.remove(&ids[node]);
+            }
+            assert!(
+                table.contains(&ids[node]) || ids[node] == table.local_node() || !should_retain,
+                "seed={seed}: expected contact was not retained"
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RoutingLifecycleEvent {
+    Join(usize),
+    Leave(usize),
+    Partition,
+    Heal,
 }
 
 struct RoutingLifecycle {

@@ -24,6 +24,18 @@ pub struct SimulationReport {
     pub duplicate_deliveries: usize,
     /// Number of explicit replay events scheduled.
     pub replayed_messages: usize,
+    /// Number of messages dropped because they crossed a partition.
+    pub partition_drops: usize,
+    /// Number of message attempts rejected by a node's connection limit.
+    pub rejected_connections: usize,
+    /// Number of out-of-order deliveries when injected reordering is enabled.
+    pub reordered_deliveries: usize,
+    /// Number of conflicting signed authority states emitted by scripts.
+    pub byzantine_state_messages: usize,
+    /// Number of node restarts that cleared local sketch state.
+    pub node_restarts: usize,
+    /// Number of previously observed client identities reinserted after restart.
+    pub restart_reinsertions: usize,
     /// Timestamp of the final processed event.
     pub completed_at_ms: u64,
     /// Generated content and its closest known bootstrap contact.
@@ -46,6 +58,12 @@ impl fmt::Debug for SimulationReport {
             .field("delayed_messages", &self.delayed_messages)
             .field("duplicate_deliveries", &self.duplicate_deliveries)
             .field("replayed_messages", &self.replayed_messages)
+            .field("partition_drops", &self.partition_drops)
+            .field("rejected_connections", &self.rejected_connections)
+            .field("reordered_deliveries", &self.reordered_deliveries)
+            .field("byzantine_state_messages", &self.byzantine_state_messages)
+            .field("node_restarts", &self.node_restarts)
+            .field("restart_reinsertions", &self.restart_reinsertions)
             .field("completed_at_ms", &self.completed_at_ms)
             .field("contents_count", &self.contents.len())
             .field("view_content_count", &self.view_content.len())
