@@ -6,8 +6,9 @@ Reviewed again on 2026-11-02. The original sub-agent report is preserved below.
 
 | Finding | Status | Why |
 |---|---|---|
-| Node did not start libp2p | Fixed | `Node` owns `populus_network::Transport`. CLI `listen <multiaddr>` drives it. No Kademlia feature or `populus-sim` dependency. |
+| Node did not start libp2p | Fixed | `Node` owns `populus_network::Transport`. CLI `listen <multiaddr> <network-identity-ip>` drives it and derives `NodeId` from the configured eligible identity, not the bind address. No Kademlia feature or `populus-sim` dependency. |
 | No protocol message over TCP/QUIC | Fixed for direct votes | Loopback TCP and QUIC tests send canonical `DirectVote` bytes and decode them. Malformed bytes become `DirectIngestError`. |
+| Valid CLI direct votes received no response | Fixed | The listener sends an empty success response through the request's `ResponseChannel` and logs send errors without exiting. TCP and QUIC round-trip tests verify the response path. |
 | Identify and ping not observed | Fixed | `identify_and_ping_events_are_observed_on_loopback` waits until both event kinds are forwarded. |
 | PeerId/NodeId binding | Not implemented | Noise authenticates only `PeerId`. Binding bytes are not frozen before the scarcity-proof review. Recorded in `IDEAS.md`. |
 | Authority/routing envelopes | Not implemented | `populus-protocol` says envelopes are not defined and must not be invented. The node therefore decodes every inbound request as a direct vote. Recorded in `IDEAS.md`. |

@@ -120,7 +120,9 @@ pub(super) fn schedule_votes(
     ) -> Result<(), SimulationError>,
 ) -> Result<Vec<usize>, SimulationError> {
     let mut expected_by_content = vec![0_usize; config.content_count];
-    let mut egress_free_us = vec![0_u64; config.node_count];
+    // At rate R, one millisecond is R ticks and one payload occupies
+    // payload_bytes * 1,000 ticks. This keeps fractional-ms egress exact.
+    let mut egress_free_ticks = vec![0_u128; config.node_count];
     for (client_index, client_id) in clients.into_iter().enumerate() {
         let content_index = client_index % config.content_count;
         expected_by_content[content_index] += 1;
@@ -133,20 +135,21 @@ pub(super) fn schedule_votes(
                     .ok_or(SimulationError::TimeOrSequenceOverflow)?;
             }
             if let Some(bytes_per_second) = config.bandwidth_bytes_per_second {
-                let transmission_us = crate::config::SIMULATED_PAYLOAD_BYTES
-                    .checked_mul(1_000_000)
-                    .ok_or(SimulationError::TimeOrSequenceOverflow)?
-                    .div_ceil(bytes_per_second);
+                let ticks_per_ms = u128::from(bytes_per_second);
+                let ready_ticks = u128::from(at_ms)
+                    .checked_mul(ticks_per_ms)
+                    .ok_or(SimulationError::TimeOrSequenceOverflow)?;
                 let source = client_index % config.node_count;
-                let ready_us = at_ms
+                let transmission_ticks = u128::from(crate::config::SIMULATED_PAYLOAD_BYTES)
                     .checked_mul(1_000)
                     .ok_or(SimulationError::TimeOrSequenceOverflow)?;
-                let finish_us = ready_us
-                    .max(egress_free_us[source])
-                    .checked_add(transmission_us)
+                let finish_ticks = ready_ticks
+                    .max(egress_free_ticks[source])
+                    .checked_add(transmission_ticks)
                     .ok_or(SimulationError::TimeOrSequenceOverflow)?;
-                egress_free_us[source] = finish_us;
-                at_ms = finish_us.div_ceil(1_000);
+                egress_free_ticks[source] = finish_ticks;
+                at_ms = u64::try_from(finish_ticks.div_ceil(ticks_per_ms))
+                    .map_err(|_| SimulationError::TimeOrSequenceOverflow)?;
             }
             if let Some(reorder_delay) = config.reordering {
                 at_ms = at_ms

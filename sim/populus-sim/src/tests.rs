@@ -449,7 +449,6 @@ fn restart_clears_state_while_crash_recovery_and_leave_keep_it() {
 #[test]
 fn bandwidth_and_connection_limits_affect_virtual_delivery() {
     const SEED: u64 = 0xFA17_0005;
-    const BANDWIDTH_BYTES_PER_SECOND: u64 = 1_000_000;
     let control = SimulationConfig {
         seed: SEED,
         node_count: 6,
@@ -463,36 +462,42 @@ fn bandwidth_and_connection_limits_affect_virtual_delivery() {
         client_count: 1_000,
         content_count: 1,
         latency: LatencyDistribution::Fixed(0),
-        bandwidth_bytes_per_second: Some(BANDWIDTH_BYTES_PER_SECOND),
         ..SimulationConfig::default()
     };
-    let bandwidth = run_simulation(&SimulationConfig {
-        ..bandwidth_config.clone()
-    })
-    .expect("bounded-bandwidth scenario runs");
     let bandwidth_baseline = run_simulation(&SimulationConfig {
-        bandwidth_bytes_per_second: None,
         ..bandwidth_config.clone()
     })
     .expect("unlimited-bandwidth scenario runs");
     let messages_per_source = bandwidth_config.client_count * VIEW_COUNT;
-    let transmission_us =
-        (SIMULATED_PAYLOAD_BYTES * 1_000_000).div_ceil(BANDWIDTH_BYTES_PER_SECOND);
-    let expected_finish_ms = u64::try_from(messages_per_source)
+    let egress_ticks = u128::try_from(messages_per_source)
         .expect("message count fits")
-        .checked_mul(transmission_us)
-        .expect("simulated egress duration fits")
-        .div_ceil(1_000);
+        .checked_mul(u128::from(SIMULATED_PAYLOAD_BYTES))
+        .expect("total simulated bytes fit")
+        .checked_mul(1_000)
+        .expect("rate-scaled egress duration fits");
+    assert_eq!(bandwidth_baseline.completed_at_ms, 0, "seed={SEED}");
     assert_eq!(
-        bandwidth.completed_at_ms, expected_finish_ms,
-        "seed={SEED}: egress bandwidth did not serialize sub-millisecond sends"
-    );
-    assert_eq!(
-        bandwidth.delivered_messages, bandwidth_baseline.delivered_messages,
+        bandwidth_baseline.delivered_messages, messages_per_source,
         "seed={SEED}"
     );
-    assert_eq!(bandwidth_baseline.completed_at_ms, 0, "seed={SEED}");
-    assert_eq!(bandwidth.completed_at_ms, 384, "seed={SEED}");
+    for (bytes_per_second, expected_ms) in [(1_000_000_u64, 384_u64), (1_000_000_000, 1)] {
+        let bandwidth = run_simulation(&SimulationConfig {
+            bandwidth_bytes_per_second: Some(bytes_per_second),
+            ..bandwidth_config.clone()
+        })
+        .expect("bounded-bandwidth scenario runs");
+        let exact_finish_ms = u64::try_from(egress_ticks.div_ceil(u128::from(bytes_per_second)))
+            .expect("simulated egress time fits");
+        assert_eq!(exact_finish_ms, expected_ms, "seed={SEED}");
+        assert_eq!(
+            bandwidth.completed_at_ms, exact_finish_ms,
+            "seed={SEED}: egress rounded each transmission before event delivery"
+        );
+        assert_eq!(
+            bandwidth.delivered_messages, bandwidth_baseline.delivered_messages,
+            "seed={SEED}"
+        );
+    }
     let limited = run_simulation(&SimulationConfig {
         connection_limit: Some(1),
         ..control
