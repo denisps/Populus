@@ -120,7 +120,7 @@ pub(super) fn schedule_votes(
     ) -> Result<(), SimulationError>,
 ) -> Result<Vec<usize>, SimulationError> {
     let mut expected_by_content = vec![0_usize; config.content_count];
-    let mut egress_free_ms = vec![0_u64; config.node_count];
+    let mut egress_free_us = vec![0_u64; config.node_count];
     for (client_index, client_id) in clients.into_iter().enumerate() {
         let content_index = client_index % config.content_count;
         expected_by_content[content_index] += 1;
@@ -133,17 +133,20 @@ pub(super) fn schedule_votes(
                     .ok_or(SimulationError::TimeOrSequenceOverflow)?;
             }
             if let Some(bytes_per_second) = config.bandwidth_bytes_per_second {
-                let transmission_ms = crate::config::SIMULATED_PAYLOAD_BYTES
-                    .checked_mul(1_000)
+                let transmission_us = crate::config::SIMULATED_PAYLOAD_BYTES
+                    .checked_mul(1_000_000)
                     .ok_or(SimulationError::TimeOrSequenceOverflow)?
-                    / bytes_per_second;
+                    .div_ceil(bytes_per_second);
                 let source = client_index % config.node_count;
-                let start_ms = at_ms.max(egress_free_ms[source]);
-                let finish_ms = start_ms
-                    .checked_add(transmission_ms)
+                let ready_us = at_ms
+                    .checked_mul(1_000)
                     .ok_or(SimulationError::TimeOrSequenceOverflow)?;
-                egress_free_ms[source] = finish_ms;
-                at_ms = finish_ms;
+                let finish_us = ready_us
+                    .max(egress_free_us[source])
+                    .checked_add(transmission_us)
+                    .ok_or(SimulationError::TimeOrSequenceOverflow)?;
+                egress_free_us[source] = finish_us;
+                at_ms = finish_us.div_ceil(1_000);
             }
             if let Some(reorder_delay) = config.reordering {
                 at_ms = at_ms

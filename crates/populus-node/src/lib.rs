@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn identify_or_ping_event_is_observed_on_loopback() {
+    async fn identify_and_ping_events_are_observed_on_loopback() {
         let mut server = Node::new(NodeId::from_bytes([7; 32])).expect("server node");
         let mut client = Node::new(NodeId::from_bytes([8; 32])).expect("client node");
         server
@@ -311,27 +311,32 @@ mod tests {
         let address = listening_address(&mut server).await;
         client.dial(address).expect("dial");
 
+        let mut identify_observed = false;
+        let mut ping_observed = false;
         tokio::time::timeout(EVENT_TIMEOUT, async {
-            loop {
-                tokio::select! {
+            while !identify_observed || !ping_observed {
+                let event = tokio::select! {
                     event = server.next_event() => {
-                        if matches!(event, NodeEvent::Transport(
-                            super::TransportEvent::Identify(_) | super::TransportEvent::Ping(_)
-                        )) {
-                            break;
-                        }
+                        event
                     }
                     event = client.next_event() => {
-                        if matches!(event, NodeEvent::Transport(
-                            super::TransportEvent::Identify(_) | super::TransportEvent::Ping(_)
-                        )) {
-                            break;
-                        }
+                        event
                     }
+                };
+                match event {
+                    NodeEvent::Transport(super::TransportEvent::Identify(_)) => {
+                        identify_observed = true;
+                    }
+                    NodeEvent::Transport(super::TransportEvent::Ping(_)) => {
+                        ping_observed = true;
+                    }
+                    _ => {}
                 }
             }
         })
         .await
-        .expect("identify or ping behaviour event is forwarded");
+        .expect("identify and ping behaviour events are forwarded");
+        assert!(identify_observed, "identify event was not forwarded");
+        assert!(ping_observed, "ping event was not forwarded");
     }
 }

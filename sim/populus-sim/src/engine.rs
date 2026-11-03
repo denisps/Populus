@@ -730,7 +730,7 @@ impl EquivocationContext {
         let routing_key = RoutingKey::from_bytes(self.node_ids[signer_node].to_bytes());
         let selected = select_authorities(&routing_key, &self.members)
             .map_err(|_| SimulationError::AuthorityScenario)?;
-        if selected.len() < 3 {
+        if selected.len() < 4 {
             return Err(SimulationError::InvalidByzantineScript);
         }
         let membership = MembershipView::new(routing_key, 1, selected.clone())

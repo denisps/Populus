@@ -8,7 +8,7 @@ Reviewed again on 2026-11-02. The original sub-agent report is preserved below.
 |---|---|---|
 | Node did not start libp2p | Fixed | `Node` owns `populus_network::Transport`. CLI `listen <multiaddr>` drives it. No Kademlia feature or `populus-sim` dependency. |
 | No protocol message over TCP/QUIC | Fixed for direct votes | Loopback TCP and QUIC tests send canonical `DirectVote` bytes and decode them. Malformed bytes become `DirectIngestError`. |
-| Identify and ping not observed | Fixed | `identify_or_ping_event_is_observed_on_loopback`. |
+| Identify and ping not observed | Fixed | `identify_and_ping_events_are_observed_on_loopback` waits until both event kinds are forwarded. |
 | PeerId/NodeId binding | Not implemented | Noise authenticates only `PeerId`. Binding bytes are not frozen before the scarcity-proof review. Recorded in `IDEAS.md`. |
 | Authority/routing envelopes | Not implemented | `populus-protocol` says envelopes are not defined and must not be invented. The node therefore decodes every inbound request as a direct vote. Recorded in `IDEAS.md`. |
 | Separate caller-cancel API | Not added | The plan's cancellation test is connection cancellation. `populus-network` covers pending and queued failure on local and remote disconnect. |
@@ -22,7 +22,7 @@ Reviewed again on 2026-11-02. The original sub-agent report is preserved below.
 
 | Requirement | Status | Evidence |
 |---|---|---|
-| libp2p dependency with TCP, QUIC, Noise, Yamux, DNS, identify, ping, request-response; no Kademlia | **PASS** | `/workspaces/Populus/denisps/Populus/Cargo.toml:17-27` |
+| libp2p dependency with TCP, QUIC, Noise, Yamux, DNS, identify, ping, request-response; no Kademlia | **PASS** | `Cargo.toml:17-27` |
 | Real `Swarm` and transport construction | **PASS** | `crates/populus-network/src/lib.rs:284-305`, `538-560` |
 | TCP + Noise + Yamux | **PASS** | `crates/populus-network/src/lib.rs:541-546` |
 | QUIC | **PASS** | `crates/populus-network/src/lib.rs:547` |

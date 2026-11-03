@@ -274,7 +274,7 @@ pub enum SimulationError {
     InvalidResourceLimit,
     /// A packet-loss probability exceeds its millionths scale.
     InvalidProbability,
-    /// A scripted state-equivocation node is not in the selected authority view.
+    /// A state-equivocation script cannot use a valid four-member authority view.
     InvalidByzantineScript,
     /// A public authority-cluster API rejected a simulator-generated state.
     AuthorityScenario,
@@ -400,6 +400,16 @@ pub(super) fn validate_config(config: &SimulationConfig) -> Result<(), Simulatio
         if node >= config.node_count {
             return Err(SimulationError::NodeIndexOutOfRange(node));
         }
+    }
+    if config.node_count < 4
+        && config.byzantine_scripts.iter().any(|script| {
+            matches!(
+                script.action,
+                ByzantineAction::SendConflictingAuthorityStates
+            )
+        })
+    {
+        return Err(SimulationError::InvalidByzantineScript);
     }
     let mut transitions = BTreeSet::new();
     for event in &config.failure_schedule {

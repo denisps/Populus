@@ -193,6 +193,19 @@ fn malformed_counts_distributions_and_failure_events_are_rejected() {
         }),
         Err(SimulationError::NodeIndexOutOfRange(2))
     ));
+    for node_count in 1..4 {
+        assert!(matches!(
+            run_simulation(&SimulationConfig {
+                node_count,
+                byzantine_scripts: vec![ByzantineScript {
+                    node: 0,
+                    action: ByzantineAction::SendConflictingAuthorityStates,
+                }],
+                ..SimulationConfig::default()
+            }),
+            Err(SimulationError::InvalidByzantineScript)
+        ));
+    }
     assert!(matches!(
         run_simulation(&SimulationConfig {
             node_count: 2,
@@ -436,6 +449,7 @@ fn restart_clears_state_while_crash_recovery_and_leave_keep_it() {
 #[test]
 fn bandwidth_and_connection_limits_affect_virtual_delivery() {
     const SEED: u64 = 0xFA17_0005;
+    const BANDWIDTH_BYTES_PER_SECOND: u64 = 1_000_000;
     let control = SimulationConfig {
         seed: SEED,
         node_count: 6,
@@ -443,24 +457,42 @@ fn bandwidth_and_connection_limits_affect_virtual_delivery() {
         latency: LatencyDistribution::Fixed(0),
         ..SimulationConfig::default()
     };
+    let bandwidth_config = SimulationConfig {
+        seed: SEED,
+        node_count: 1,
+        client_count: 1_000,
+        content_count: 1,
+        latency: LatencyDistribution::Fixed(0),
+        bandwidth_bytes_per_second: Some(BANDWIDTH_BYTES_PER_SECOND),
+        ..SimulationConfig::default()
+    };
     let bandwidth = run_simulation(&SimulationConfig {
-        bandwidth_bytes_per_second: Some(128),
-        ..control.clone()
+        ..bandwidth_config.clone()
     })
     .expect("bounded-bandwidth scenario runs");
-    let baseline = run_simulation(&control).expect("unlimited-bandwidth scenario runs");
-    let messages_per_source = control.client_count / control.node_count * VIEW_COUNT;
-    let transmission_ms = SIMULATED_PAYLOAD_BYTES * 1_000 / 128;
+    let bandwidth_baseline = run_simulation(&SimulationConfig {
+        bandwidth_bytes_per_second: None,
+        ..bandwidth_config.clone()
+    })
+    .expect("unlimited-bandwidth scenario runs");
+    let messages_per_source = bandwidth_config.client_count * VIEW_COUNT;
+    let transmission_us =
+        (SIMULATED_PAYLOAD_BYTES * 1_000_000).div_ceil(BANDWIDTH_BYTES_PER_SECOND);
+    let expected_finish_ms = u64::try_from(messages_per_source)
+        .expect("message count fits")
+        .checked_mul(transmission_us)
+        .expect("simulated egress duration fits")
+        .div_ceil(1_000);
     assert_eq!(
-        bandwidth.completed_at_ms,
-        u64::try_from(messages_per_source).expect("message count fits") * transmission_ms,
-        "seed={SEED}: egress bandwidth did not serialize concurrent sends"
+        bandwidth.completed_at_ms, expected_finish_ms,
+        "seed={SEED}: egress bandwidth did not serialize sub-millisecond sends"
     );
     assert_eq!(
-        bandwidth.delivered_messages, baseline.delivered_messages,
+        bandwidth.delivered_messages, bandwidth_baseline.delivered_messages,
         "seed={SEED}"
     );
-    assert_eq!(baseline.completed_at_ms, 0, "seed={SEED}");
+    assert_eq!(bandwidth_baseline.completed_at_ms, 0, "seed={SEED}");
+    assert_eq!(bandwidth.completed_at_ms, 384, "seed={SEED}");
     let limited = run_simulation(&SimulationConfig {
         connection_limit: Some(1),
         ..control
