@@ -752,7 +752,7 @@ impl EquivocationContext {
             .map_err(|_| SimulationError::AuthorityScenario)?;
         let first = SignedAuthorityState::sign(state.clone(), &self.keys[signer_node])
             .map_err(|_| SimulationError::AuthorityScenario)?;
-        let second = SignedAuthorityState::sign(conflict, &self.keys[signer_node])
+        let second = SignedAuthorityState::sign(conflict.clone(), &self.keys[signer_node])
             .map_err(|_| SimulationError::AuthorityScenario)?;
         EquivocationProof::new(first.clone(), second.clone())
             .map_err(|_| SimulationError::AuthorityScenario)?
@@ -760,7 +760,7 @@ impl EquivocationContext {
             .map_err(|_| SimulationError::AuthorityScenario)?;
 
         let mut expected = Vec::with_capacity(3);
-        let mut responses = vec![first, second];
+        let mut responses = vec![first.clone(), second.clone()];
         for member in selected.iter().take(3) {
             expected.push(member.authority_id());
             if member.authority_id() == signer_id {
@@ -779,7 +779,32 @@ impl EquivocationContext {
         let resolution = resolve_authority_state(&membership, &expected, &responses)
             .map_err(|_| SimulationError::AuthorityScenario)?;
         match resolution {
-            StateResolution::Quorum(quorum) if quorum.state() == &state => Ok(2),
+            StateResolution::Quorum(quorum) if quorum.state() == &state => {}
+            _ => return Err(SimulationError::AuthorityScenario),
+        }
+
+        let conflicting_signer = expected
+            .iter()
+            .copied()
+            .find(|id| *id != signer_id)
+            .ok_or(SimulationError::AuthorityScenario)?;
+        let conflicting_key = self
+            .keys
+            .iter()
+            .find(|key| key.authority_id() == conflicting_signer)
+            .ok_or(SimulationError::AuthorityScenario)?;
+        let conflicting_response = SignedAuthorityState::sign(conflict, conflicting_key)
+            .map_err(|_| SimulationError::AuthorityScenario)?;
+        let recovery = resolve_authority_state(
+            &membership,
+            &expected,
+            &[first, second, conflicting_response],
+        )
+        .map_err(|_| SimulationError::AuthorityScenario)?;
+        match recovery {
+            StateResolution::RecoveryNeeded {
+                best_matching: 1, ..
+            } => Ok(2),
             _ => Err(SimulationError::AuthorityScenario),
         }
     }

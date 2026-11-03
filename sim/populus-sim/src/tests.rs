@@ -548,6 +548,38 @@ fn packet_latency_does_not_delay_later_egress_reservations() {
 }
 
 #[test]
+fn injected_reordering_delay_is_applied_to_scheduled_votes() {
+    const SEED: u64 = 2;
+    let config = SimulationConfig {
+        seed: SEED,
+        node_count: 1,
+        client_count: 1,
+        content_count: 1,
+        latency: LatencyDistribution::Fixed(0),
+        reordering: Some(LatencyDistribution::Uniform {
+            min_ms: 10,
+            max_ms: 10,
+        }),
+        ..SimulationConfig::default()
+    };
+    let mut random = crate::rng::SeededRandom::new(SEED);
+    let mut delivery_times = Vec::new();
+
+    crate::workload::schedule_votes(
+        &config,
+        vec![ClientId::from_bytes([1; 32])],
+        &mut random,
+        |at_ms, _, _, _, _, _, _| {
+            delivery_times.push(at_ms);
+            Ok(())
+        },
+    )
+    .expect("scheduled votes fit the virtual timeline");
+
+    assert_eq!(delivery_times, [10, 10, 10], "seed={SEED}");
+}
+
+#[test]
 fn byzantine_script_emits_conflicting_signed_states_but_not_a_conflicting_quorum() {
     const SEED: u64 = 0xFA17_0006;
     let config = SimulationConfig {
