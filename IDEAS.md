@@ -32,6 +32,11 @@
   currently reject new contacts forever, which is correct until that signal
   exists and wrong if closer live nodes can never enter. Do not evict merely
   because a bucket is full.
+- Measure delegated-assignment target grinding before freezing assignment v1.
+  An ingest node whose `NodeId` can be chosen near a content neighborhood or a
+  view hash may concentrate assignments even though per-client view collisions
+  are prevented. Simulate the choices available under the scarcity-identity
+  model and bound how many clients one resource can capture per view.
 - Make daily finalization a signed cluster statement. Each authority now
   finalizes from its local clock, so one fast clock can reject a vote that
   another authority still accepts. A day should become cluster-final only

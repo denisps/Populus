@@ -7,6 +7,8 @@ use std::fmt;
 /// Number of independent client assignment views.
 pub const INGEST_VIEW_COUNT: u8 = 3;
 const INGEST_VIEW_COUNT_USIZE: usize = INGEST_VIEW_COUNT as usize;
+/// Experimental assignment descriptor and hash-domain version.
+pub const ASSIGNMENT_VERSION: u8 = 1;
 /// Maximum number of leading identifier bits considered by `MatchBits`.
 pub const MATCH_BITS_MAX: u16 = 256;
 const HASH_DOMAIN: &[u8] = b"populus/ingest-assignment/v1";
@@ -45,6 +47,7 @@ pub enum AssignmentAlgorithm {
 /// Immutable assignment inputs published as part of a delegation descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegationDescriptor {
+    algorithm_version: u8,
     algorithm: AssignmentAlgorithm,
     candidates: Vec<IngestNode>,
     match_bits: u16,
@@ -76,10 +79,17 @@ impl DelegationDescriptor {
             return Err(AssignmentError::DuplicateCandidate);
         }
         Ok(Self {
+            algorithm_version: ASSIGNMENT_VERSION,
             algorithm,
             candidates,
             match_bits,
         })
+    }
+
+    /// Returns the assignment descriptor version.
+    #[must_use]
+    pub const fn algorithm_version(&self) -> u8 {
+        self.algorithm_version
     }
 
     /// Returns the assignment candidate encoded in this descriptor.
@@ -98,6 +108,15 @@ impl DelegationDescriptor {
     #[must_use]
     pub const fn match_bits(&self) -> u16 {
         self.match_bits
+    }
+
+    /// Estimates descriptor bytes as candidate IDs plus the experimental header.
+    ///
+    /// This is a simulation metric, not a frozen wire encoding. It counts four
+    /// header bytes and one 32-byte `NodeId` per candidate.
+    #[must_use]
+    pub fn estimated_encoded_len(&self) -> usize {
+        self.candidates.len().saturating_mul(32).saturating_add(4)
     }
 
     /// Assigns one client to one candidate using the encoded algorithm.
@@ -370,8 +389,10 @@ mod tests {
     fn descriptor_canonicalizes_candidates_and_rejects_invalid_sets() {
         let first = descriptor(AssignmentAlgorithm::XorNearest, vec![node(2), node(1)], 0);
         let second = descriptor(AssignmentAlgorithm::XorNearest, vec![node(1), node(2)], 0);
+        assert_eq!(first.algorithm_version(), ASSIGNMENT_VERSION);
         assert_eq!(first, second);
         assert_eq!(first.candidates(), &[node(1), node(2)]);
+        assert_eq!(first.estimated_encoded_len(), 68);
         assert_eq!(
             DelegationDescriptor::new(AssignmentAlgorithm::XorNearest, Vec::new(), 0),
             Err(AssignmentError::NoCandidates)
@@ -436,6 +457,128 @@ mod tests {
         let destinations = descriptor.assign_views(client).unwrap();
         assert_ne!(destinations[0], destinations[1]);
         assert!(destinations.contains(&destinations[2]));
+    }
+
+    #[test]
+    fn xor_assignment_reacts_deterministically_to_candidate_set_changes() {
+        let client = ClientId::from_bytes([13; 32]);
+        let original = descriptor(AssignmentAlgorithm::XorNearest, vec![node(1), node(2)], 0);
+        let target = client_view_hash(client, 0);
+        let targeted_node = IngestNode::new(NodeId::from_bytes(target));
+        let expanded = descriptor(
+            AssignmentAlgorithm::XorNearest,
+            vec![node(1), node(2), targeted_node],
+            0,
+        );
+
+        assert_ne!(original.assign(client, 0).unwrap(), targeted_node);
+        assert_eq!(expanded.assign(client, 0).unwrap(), targeted_node);
+        assert_eq!(expanded.assign(client, 0).unwrap(), targeted_node);
+    }
+
+    #[test]
+    fn assignment_views_do_not_capture_the_same_candidate_together() {
+        let candidates: Vec<_> = (0..8)
+            .map(|index| {
+                let mut bytes = [0; 32];
+                bytes[0] = index << 5;
+                IngestNode::new(NodeId::from_bytes(bytes))
+            })
+            .collect();
+        let client_ids: Vec<_> = (0..4_096_u64)
+            .map(|index| {
+                let mut hasher = Sha256::new();
+                hasher.update(b"populus/assignment-test-client/v1");
+                hasher.update(index.to_be_bytes());
+                ClientId::from_bytes(hasher.finalize().into())
+            })
+            .collect();
+        for algorithm in [
+            AssignmentAlgorithm::SaltedClientHash,
+            AssignmentAlgorithm::DisjointClientRanges,
+            AssignmentAlgorithm::XorNearest,
+            AssignmentAlgorithm::MatchBits,
+        ] {
+            let descriptor = descriptor(
+                algorithm,
+                candidates.clone(),
+                if algorithm == AssignmentAlgorithm::MatchBits {
+                    3
+                } else {
+                    0
+                },
+            );
+            let mut matching_pairs = [0; 3];
+            for client_id in &client_ids {
+                let assigned = (0..INGEST_VIEW_COUNT)
+                    .map(|view| algorithm.assign(*client_id, view, &descriptor).unwrap())
+                    .collect::<Vec<_>>();
+                for (pair_index, (left, right)) in [(0, 1), (0, 2), (1, 2)].into_iter().enumerate()
+                {
+                    if assigned[left] == assigned[right] {
+                        matching_pairs[pair_index] += 1;
+                    }
+                }
+            }
+            assert!(
+                matching_pairs.into_iter().all(|count| count < 800),
+                "{algorithm:?} views repeatedly selected the same candidate: {matching_pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_malicious_candidate_cannot_capture_multiple_views_or_a_majority() {
+        let malicious = node(0);
+        let mut candidates: Vec<_> = (1..32)
+            .map(|index| {
+                let mut hasher = Sha256::new();
+                hasher.update(b"populus/assignment-test-node/v1");
+                hasher.update([index]);
+                IngestNode::new(NodeId::from_bytes(hasher.finalize().into()))
+            })
+            .collect();
+        candidates.push(malicious);
+        let clients: Vec<_> = (0..4_096_u64)
+            .map(|index| {
+                let mut hasher = Sha256::new();
+                hasher.update(b"populus/assignment-test-client/v1");
+                hasher.update(index.to_be_bytes());
+                ClientId::from_bytes(hasher.finalize().into())
+            })
+            .collect();
+
+        for algorithm in [
+            AssignmentAlgorithm::SaltedClientHash,
+            AssignmentAlgorithm::DisjointClientRanges,
+            AssignmentAlgorithm::XorNearest,
+            AssignmentAlgorithm::MatchBits,
+        ] {
+            let descriptor = descriptor(algorithm, candidates.clone(), 5);
+            let mut malicious_assignments = [0; INGEST_VIEW_COUNT_USIZE];
+            for client in &clients {
+                let assigned = descriptor.assign_views(*client).unwrap();
+                assert!(
+                    assigned
+                        .iter()
+                        .filter(|candidate| **candidate == malicious)
+                        .count()
+                        <= 1,
+                    "{algorithm:?} assigned one client to the malicious node in multiple views"
+                );
+                for (view, candidate) in assigned.into_iter().enumerate() {
+                    if candidate == malicious {
+                        malicious_assignments[view] += 1;
+                    }
+                }
+            }
+            assert!(
+                malicious_assignments
+                    .into_iter()
+                    .all(|count| count < clients.len() / 2),
+                "{algorithm:?} let one node capture most clients: {malicious_assignments:?}"
+            );
+        }
     }
 
     #[test]

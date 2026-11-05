@@ -1,3 +1,4 @@
+use populus_cluster::{AssignmentAlgorithm, AssignmentError, INGEST_VIEW_COUNT};
 use populus_content::ContentError;
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -11,8 +12,8 @@ pub const MAX_SIMULATION_NODES: usize = 100_000;
 pub const MAX_SIMULATION_CLIENTS: usize = 1_000_000;
 /// Maximum number of generated contents.
 pub const MAX_SIMULATION_CONTENTS: usize = 100_000;
-/// Number of independently sampled workload destinations per client.
-pub const VIEW_COUNT: usize = 3;
+/// Number of delegated-assignment destinations per client.
+pub const VIEW_COUNT: usize = INGEST_VIEW_COUNT as usize;
 /// Fixed vote payload used to model bounded-bandwidth transmission.
 pub const SIMULATED_PAYLOAD_BYTES: u64 = 128;
 /// Packet-loss probability scale; `1_000_000` means certain loss.
@@ -178,7 +179,7 @@ pub enum MaliciousStrategy {
 /// Inputs for one reproducible distributed workload.
 #[derive(Clone, Debug)]
 pub struct SimulationConfig {
-    /// Seed for all generated identities, message destinations, and samples.
+    /// Seed for generated identities and sampled network timing/fault behavior.
     pub seed: u64,
     /// Number of virtual nodes.
     pub node_count: usize,
@@ -186,6 +187,12 @@ pub struct SimulationConfig {
     pub client_count: usize,
     /// Number of generated immutable contents.
     pub content_count: usize,
+    /// Experimental delegated-assignment candidate used for vote placement.
+    pub assignment_algorithm: AssignmentAlgorithm,
+    /// Offered rate used to size `MatchBits` from the observed candidate population.
+    pub offered_votes_per_minute: u64,
+    /// Desired maximum rate for each ingest node when sizing `MatchBits`.
+    pub max_votes_per_node_per_minute: u64,
     /// Per-message virtual network latency.
     pub latency: LatencyDistribution,
     /// Per-node virtual clock offset.
@@ -226,6 +233,9 @@ impl Default for SimulationConfig {
             node_count: 8,
             client_count: 32,
             content_count: 1,
+            assignment_algorithm: AssignmentAlgorithm::XorNearest,
+            offered_votes_per_minute: 1_000,
+            max_votes_per_node_per_minute: 1_000,
             latency: LatencyDistribution::Uniform {
                 min_ms: 0,
                 max_ms: 20,
@@ -282,6 +292,8 @@ pub enum SimulationError {
     TimeOrSequenceOverflow,
     /// The routing implementation disagreed with its brute-force oracle.
     RoutingInvariant,
+    /// The delegated-ingest assignment API rejected a simulated descriptor or input.
+    Assignment(AssignmentError),
     /// The generated content failed canonical validation.
     Content(ContentError),
     /// A randomized run failed; rerun the same configuration with this seed.
@@ -331,6 +343,7 @@ impl fmt::Display for SimulationError {
             Self::RoutingInvariant => {
                 formatter.write_str("routing lookup disagreed with the brute-force oracle")
             }
+            Self::Assignment(error) => write!(formatter, "invalid ingest assignment: {error}"),
             Self::Content(error) => write!(formatter, "generated content is invalid: {error}"),
             Self::Scenario { seed, source } => {
                 write!(formatter, "simulation failed (seed {seed}): {source}")
@@ -343,6 +356,7 @@ impl Error for SimulationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Content(error) => Some(error),
+            Self::Assignment(error) => Some(error),
             Self::Scenario { source, .. } => Some(source),
             _ => None,
         }
@@ -352,6 +366,12 @@ impl Error for SimulationError {
 impl From<ContentError> for SimulationError {
     fn from(error: ContentError) -> Self {
         Self::Content(error)
+    }
+}
+
+impl From<AssignmentError> for SimulationError {
+    fn from(error: AssignmentError) -> Self {
+        Self::Assignment(error)
     }
 }
 
@@ -367,6 +387,13 @@ pub(super) fn validate_config(config: &SimulationConfig) -> Result<(), Simulatio
     }
     if config.content_count > MAX_SIMULATION_CONTENTS {
         return Err(SimulationError::CountLimitExceeded("content count"));
+    }
+    if config.assignment_algorithm == AssignmentAlgorithm::MatchBits
+        && (config.offered_votes_per_minute == 0 || config.max_votes_per_node_per_minute == 0)
+    {
+        return Err(SimulationError::Assignment(
+            AssignmentError::InvalidCapacityInput,
+        ));
     }
     if !config.latency.is_valid()
         || !config.clock_skew.is_valid()

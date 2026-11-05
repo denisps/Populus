@@ -1,4 +1,4 @@
-use crate::config::{ClockSkewDistribution, LatencyDistribution, SimulationError};
+use crate::config::{ClockSkewDistribution, LatencyDistribution};
 
 pub(crate) struct SeededRandom {
     state: u64,
@@ -17,16 +17,6 @@ impl SeededRandom {
         value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         value ^ (value >> 31)
-    }
-
-    pub(crate) fn index(&mut self, length: usize) -> Result<usize, SimulationError> {
-        let length =
-            u64::try_from(length).map_err(|_| SimulationError::CountLimitExceeded("node count"))?;
-        if length == 0 {
-            return Err(SimulationError::NoNodes);
-        }
-        usize::try_from(self.sample_below(length))
-            .map_err(|_| SimulationError::CountLimitExceeded("node count"))
     }
 
     pub(crate) fn sample_below(&mut self, bound: u64) -> u64 {

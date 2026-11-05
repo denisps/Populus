@@ -16,8 +16,8 @@ pub use direct_ingest::{
     DirectVoteOutcome, PersistentLike, SignedDirectVoteAck,
 };
 pub use ingest_assignment::{
-    AssignmentAlgorithm, AssignmentError, DelegationDescriptor, INGEST_VIEW_COUNT,
-    IngestAssignment, IngestNode, MATCH_BITS_MAX, select_match_bits,
+    ASSIGNMENT_VERSION, AssignmentAlgorithm, AssignmentError, DelegationDescriptor,
+    INGEST_VIEW_COUNT, IngestAssignment, IngestNode, MATCH_BITS_MAX, select_match_bits,
 };
 
 /// Number of authorities selected for a routing key.
