@@ -960,7 +960,9 @@ Direct-vote and signed-ack wire bytes are fixed by
 
 # 14. Phase 9: delegated ingest assignment experiment
 
-Do not freeze the assignment algorithm before simulation.
+Do not freeze the assignment algorithm before simulation. Phase 9 supplies the
+experimental harness and candidate implementations, but does not choose a
+protocol-v1 algorithm or wire encoding.
 
 Define an interface:
 
@@ -982,6 +984,14 @@ C. XOR/rendezvous selection among delegated nodes
 
 D. MatchBits-based assignment within the ContentID neighborhood
 ```
+
+`populus-cluster` implements these candidates behind the `IngestAssignment`
+trait. `DelegationDescriptor` canonicalizes a unique candidate set and records
+the assignment version, candidate strategy, and MatchBits width. Per-content
+simulator descriptors use the closest known nodes in that content's
+`RoutingKey` neighborhood. The three-view helper resolves collisions
+deterministically and uses distinct destinations whenever the candidate pool
+permits.
 
 Selection goals:
 
@@ -1006,9 +1016,24 @@ Never assume:
 
 NodeIDs are sparse random points.
 
-The selected bit width must be based on the observed candidate population and measured ingest rate.
+The selected bit width must be based on the observed candidate population and
+measured ingest rate.
 
-Benchmark and simulate before choosing protocol v1.
+The MatchBits width helper uses the observed candidate count, offered rate, and
+per-ingest-node rate target. A missing sparse prefix falls back to the closest
+candidate rather than reporting a missing destination.
+
+`populus-sim` can run each candidate through the same seeded workload and
+reports per-view node loads, the observed candidate count, the selected
+MatchBits width, and an experimental descriptor-size estimate. Run the
+assignment microbenchmark with:
+
+```bash
+cargo run --release -p populus-cluster --example ingest_assignment_benchmark
+```
+
+These measurements leave protocol-v1 selection and canonical wire encoding
+open for a later decision.
 
 ---
 

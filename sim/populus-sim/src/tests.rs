@@ -6,7 +6,19 @@ use super::{
     PartitionAction, PartitionEvent, SIMULATED_PAYLOAD_BYTES, SimulationConfig, SimulationError,
     VIEW_COUNT, run_simulation,
 };
-use populus_types::ClientId;
+use populus_cluster::{AssignmentAlgorithm, DelegationDescriptor, IngestNode};
+use populus_types::{ClientId, NodeId};
+
+fn assignment_descriptors(node_ids: &[NodeId]) -> Vec<DelegationDescriptor> {
+    vec![
+        DelegationDescriptor::new(
+            AssignmentAlgorithm::XorNearest,
+            node_ids.iter().copied().map(IngestNode::new).collect(),
+            0,
+        )
+        .expect("simulated nodes form a valid assignment descriptor"),
+    ]
+}
 
 fn small_config() -> SimulationConfig {
     SimulationConfig {
@@ -48,6 +60,121 @@ fn seeded_scenario_is_reproducible_and_exercises_protocol_implementations()
     for summary in &first.view_content {
         assert_eq!(summary.distinct_client_estimate, 30.0);
         assert!(summary.report_windows > 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn each_assignment_candidate_is_exercised_with_balanced_three_view_loads()
+-> Result<(), SimulationError> {
+    let algorithms = [
+        AssignmentAlgorithm::SaltedClientHash,
+        AssignmentAlgorithm::DisjointClientRanges,
+        AssignmentAlgorithm::XorNearest,
+        AssignmentAlgorithm::MatchBits,
+    ];
+    let mut observed_loads = Vec::new();
+    for algorithm in algorithms {
+        let config = SimulationConfig {
+            assignment_algorithm: algorithm,
+            offered_votes_per_minute: 100,
+            max_votes_per_node_per_minute: 100,
+            ..small_config()
+        };
+        let report = run_simulation(&config)?;
+        assert_eq!(report.assignment_algorithm, algorithm);
+        assert_eq!(
+            report.assignment_version,
+            populus_cluster::ASSIGNMENT_VERSION
+        );
+        assert_eq!(
+            report.assignment_candidate_count,
+            config.node_count.min(populus_routing::BUCKET_CAPACITY)
+        );
+        assert_eq!(
+            report.assignment_descriptor_estimated_bytes,
+            Some(report.assignment_candidate_count * 32 + 4)
+        );
+        assert_eq!(report.assignment_loads.len(), config.node_count);
+        for view in 0..VIEW_COUNT {
+            let total: usize = report
+                .assignment_loads
+                .iter()
+                .map(|load| load.assignments_by_view[view])
+                .sum();
+            assert_eq!(total, config.client_count);
+            let maximum = report
+                .assignment_loads
+                .iter()
+                .map(|load| load.assignments_by_view[view])
+                .max()
+                .unwrap_or_default();
+            assert!(
+                maximum <= 30,
+                "seed={}: {algorithm:?} view {view} overloaded one node ({maximum} clients)",
+                config.seed
+            );
+        }
+        assert_eq!(
+            report,
+            run_simulation(&config)?,
+            "seed={}: assignment report was not deterministic",
+            config.seed
+        );
+        if algorithm == AssignmentAlgorithm::MatchBits {
+            assert_eq!(report.assignment_match_bits, 3);
+        } else {
+            assert_eq!(report.assignment_match_bits, 0);
+        }
+        observed_loads.push(report.assignment_loads);
+    }
+
+    assert!(
+        observed_loads.windows(2).any(|pair| pair[0] != pair[1]),
+        "all experimental candidates produced identical assignments"
+    );
+    Ok(())
+}
+
+#[test]
+fn match_bits_rejects_missing_capacity_measurements() {
+    assert!(matches!(
+        run_simulation(&SimulationConfig {
+            assignment_algorithm: AssignmentAlgorithm::MatchBits,
+            offered_votes_per_minute: 0,
+            ..SimulationConfig::default()
+        }),
+        Err(SimulationError::Assignment(
+            populus_cluster::AssignmentError::InvalidCapacityInput
+        ))
+    ));
+}
+
+#[test]
+fn match_bits_uses_the_observed_content_neighborhood_population() -> Result<(), SimulationError> {
+    let report = run_simulation(&SimulationConfig {
+        node_count: populus_routing::BUCKET_CAPACITY + 4,
+        client_count: 60,
+        content_count: 2,
+        assignment_algorithm: AssignmentAlgorithm::MatchBits,
+        offered_votes_per_minute: 100,
+        max_votes_per_node_per_minute: 100,
+        ..SimulationConfig::default()
+    })?;
+    assert_eq!(
+        report.assignment_candidate_count,
+        populus_routing::BUCKET_CAPACITY
+    );
+    assert_eq!(report.assignment_match_bits, 4);
+    for view in 0..VIEW_COUNT {
+        assert_eq!(
+            report
+                .assignment_loads
+                .iter()
+                .map(|load| load.assignments_by_view[view])
+                .sum::<usize>(),
+            60
+        );
     }
     Ok(())
 }
@@ -528,10 +655,14 @@ fn packet_latency_does_not_delay_later_egress_reservations() {
     };
     let mut random = crate::rng::SeededRandom::new(SEED);
     let mut delivery_times = Vec::new();
-    let expected_by_content = crate::workload::schedule_votes(
+    let node_ids = [NodeId::from_bytes([0; 32])];
+    let descriptors = assignment_descriptors(&node_ids);
+    let (expected_by_content, _) = crate::workload::schedule_votes(
         &config,
         vec![ClientId::from_bytes([1; 32])],
         &mut random,
+        &node_ids,
+        &descriptors,
         |at_ms, _, _, _, _, _, _| {
             delivery_times.push(at_ms);
             Ok(())
@@ -542,7 +673,7 @@ fn packet_latency_does_not_delay_later_egress_reservations() {
     assert_eq!(expected_by_content, [1]);
     assert_eq!(
         delivery_times,
-        [4_534, 568, 587],
+        [2_835, 4_534, 568],
         "seed={SEED}: one high-latency packet delayed later egress"
     );
 }
@@ -564,11 +695,15 @@ fn injected_reordering_delay_is_applied_to_scheduled_votes() {
     };
     let mut random = crate::rng::SeededRandom::new(SEED);
     let mut delivery_times = Vec::new();
+    let node_ids = [NodeId::from_bytes([0; 32])];
+    let descriptors = assignment_descriptors(&node_ids);
 
     crate::workload::schedule_votes(
         &config,
         vec![ClientId::from_bytes([1; 32])],
         &mut random,
+        &node_ids,
+        &descriptors,
         |at_ms, _, _, _, _, _, _| {
             delivery_times.push(at_ms);
             Ok(())
