@@ -11,9 +11,10 @@ populus-sketch = { version = "0.1.0", path = "../populus-sketch" }
 populus-types = { version = "0.1.0", path = "../populus-types" }
 sha2.workspace = true
 
-[[bench]]
-name = "ingest_assignment"
-harness = false
+[[example]]
+name = "ingest_assignment_benchmark"
+path = "examples/ingest_assignment_benchmark.rs"
+test = false
 
 [lints]
 workspace = true

@@ -1029,7 +1029,7 @@ MatchBits width, and an experimental descriptor-size estimate. Run the
 assignment microbenchmark with:
 
 ```bash
-cargo bench -p populus-cluster --bench ingest_assignment
+cargo run --release -p populus-cluster --example ingest_assignment_benchmark
 ```
 
 These measurements leave protocol-v1 selection and canonical wire encoding

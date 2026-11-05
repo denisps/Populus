@@ -485,7 +485,7 @@ Never assume all bit-prefix buckets contain nodes.
 Compare CPU cost with:
 
 ```bash
-cargo bench -p populus-cluster --bench ingest_assignment
+cargo run --release -p populus-cluster --example ingest_assignment_benchmark
 ```
 
 The benchmark runs 150,000 deterministic assignments per candidate with 100
