@@ -2307,6 +2307,7 @@ dependencies = [
  "populus-crypto",
  "populus-sketch",
  "populus-types",
+ "sha2 0.10.9",
 ]
 
 [[package]]

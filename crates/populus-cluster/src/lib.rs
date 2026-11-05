@@ -8,10 +8,16 @@ use populus_crypto::{
 use populus_types::{AuthorityId, Epoch, NodeId, RoutingKey, XorDistance};
 use std::collections::BTreeSet;
 
+mod ingest_assignment;
+
 pub use direct_ingest::{
     DEFAULT_CLOSE_GRACE_PERIOD_MS, DEFAULT_MAX_CLOCK_SKEW_MS, DEFAULT_MAX_DIRECT_VOTES_PER_MINUTE,
     DailyPopularityStatus, DirectIngestError, DirectIngestPolicy, DirectIngestState, DirectVote,
     DirectVoteOutcome, PersistentLike, SignedDirectVoteAck,
+};
+pub use ingest_assignment::{
+    AssignmentAlgorithm, AssignmentError, DelegationDescriptor, INGEST_VIEW_COUNT,
+    IngestAssignment, IngestNode, MATCH_BITS_MAX, select_match_bits,
 };
 
 /// Number of authorities selected for a routing key.
