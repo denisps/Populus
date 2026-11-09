@@ -180,6 +180,39 @@ fn match_bits_uses_the_observed_content_neighborhood_population() -> Result<(), 
 }
 
 #[test]
+fn match_bits_varies_from_xor_nearest_in_a_large_content_neighborhood()
+-> Result<(), SimulationError> {
+    let common = SimulationConfig {
+        seed: 0x9a71,
+        node_count: 20_000,
+        client_count: 2_000,
+        content_count: 1,
+        offered_votes_per_minute: 100,
+        max_votes_per_node_per_minute: 100,
+        ..SimulationConfig::default()
+    };
+    let match_bits = run_simulation(&SimulationConfig {
+        assignment_algorithm: AssignmentAlgorithm::MatchBits,
+        ..common.clone()
+    })?;
+    let xor_nearest = run_simulation(&SimulationConfig {
+        assignment_algorithm: AssignmentAlgorithm::XorNearest,
+        ..common
+    })?;
+
+    assert_eq!(
+        match_bits.assignment_candidate_count,
+        populus_routing::BUCKET_CAPACITY
+    );
+    assert_eq!(match_bits.assignment_match_bits, 4);
+    assert_ne!(
+        match_bits.assignment_loads, xor_nearest.assignment_loads,
+        "relative-prefix MatchBits assignments collapsed to XorNearest"
+    );
+    Ok(())
+}
+
+#[test]
 fn duplicate_and_replayed_messages_do_not_inflate_distinct_client_sketches()
 -> Result<(), SimulationError> {
     let config = SimulationConfig {

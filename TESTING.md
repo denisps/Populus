@@ -475,10 +475,14 @@ sample, that one malicious candidate cannot capture multiple views for one
 client or a majority of clients, and that candidate order does not change a
 descriptor. The simulator verifies complete per-view assignment counts,
 bounded maximum load, repeatability, per-content candidate population, and
-MatchBits sizing from the observed population and configured rates.
+MatchBits sizing from the observed population and configured rates. A larger
+simulated node population must also produce MatchBits assignments that differ
+from XorNearest.
 
 If MatchBits is used, explicitly test sparse NodeID populations. Empty
-prefixes must still assign to an existing candidate.
+prefixes must still assign to an existing candidate. MatchBits compares the
+client hash prefix with the candidate NodeId suffix after the candidates'
+shared prefix, avoiding collapse to XorNearest for dense neighborhoods.
 
 Never assume all bit-prefix buckets contain nodes.
 
@@ -489,8 +493,10 @@ cargo run --release -p populus-cluster --example ingest_assignment_benchmark
 ```
 
 The benchmark runs 150,000 deterministic assignments per candidate with 100
-candidates; its timings are machine-specific and must not be used as a protocol
-decision without the simulator's load and adversarial results.
+candidates sharing a three-byte NodeId prefix, rotates strategy order between
+samples, and prints each sample's index, order, algorithm, raw nanosecond timing,
+and checksum. Its timings are machine-specific and must not be used as a
+protocol decision without the simulator's load and adversarial results.
 
 ---
 

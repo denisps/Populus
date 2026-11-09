@@ -1020,8 +1020,10 @@ The selected bit width must be based on the observed candidate population and
 measured ingest rate.
 
 The MatchBits width helper uses the observed candidate count, offered rate, and
-per-ingest-node rate target. A missing sparse prefix falls back to the closest
-candidate rather than reporting a missing destination.
+per-ingest-node rate target. Match bits are applied to NodeId bits immediately
+after the candidate set's shared prefix and compared with the client's hash
+prefix. A missing sparse prefix falls back to the closest candidate rather than
+reporting a missing destination.
 
 `populus-sim` can run each candidate through the same seeded workload and
 reports per-view node loads, the observed candidate count, the selected
@@ -1032,8 +1034,10 @@ assignment microbenchmark with:
 cargo run --release -p populus-cluster --example ingest_assignment_benchmark
 ```
 
-These measurements leave protocol-v1 selection and canonical wire encoding
-open for a later decision.
+Each raw benchmark sample records its index, execution order, algorithm,
+nanosecond duration, and checksum. Execution order rotates between samples.
+These machine-specific measurements leave protocol-v1 selection and canonical
+wire encoding open for a later decision.
 
 ---
 

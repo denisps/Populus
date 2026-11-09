@@ -928,7 +928,7 @@ experiment exposes four candidates behind `IngestAssignment`:
 SaltedClientHash: H(ClientId || view) modulo canonical candidate order
 DisjointClientRanges: one 64-bit ClientId range per view
 XorNearest: nearest delegated NodeId to H(ClientId || view)
-MatchBits: nearest candidate sharing the selected prefix, else XorNearest
+MatchBits: match hash-prefix bits against NodeId suffix after shared candidate prefix
 ```
 
 The experimental hash target is
@@ -967,11 +967,14 @@ The algorithm and version are part of the delegation descriptor.
 
 Therefore it can be experimentally replaced before protocol v1 freezes. MatchBits
 width is derived from the observed candidate count, offered votes per minute,
-and per-node rate target. Empty sparse prefixes fall back to the nearest
-candidate; `2^bits` is never treated as the available node count. The simulator
-reports per-node/per-view assignment loads and an estimated descriptor size.
-That size estimate counts four experimental header bytes and the candidate
-NodeIds only; it is not a wire-size commitment.
+and per-node rate target. The bits are compared against the client hash's
+leading bits at an offset equal to the candidate set's longest common NodeId
+prefix, so nearby candidates remain distinguishable in larger neighborhoods.
+Empty sparse prefixes fall back to the nearest candidate; `2^bits` is never
+treated as the available node count. The simulator reports per-node/per-view
+assignment loads and an estimated descriptor size. That size estimate counts
+four experimental header bytes and the candidate NodeIds only; it is not a
+wire-size commitment.
 
 ---
 

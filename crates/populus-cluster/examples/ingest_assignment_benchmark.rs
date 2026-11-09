@@ -8,6 +8,7 @@ use std::time::Instant;
 const CANDIDATE_COUNT: usize = 100;
 const CLIENT_COUNT: usize = 10_000;
 const ITERATIONS: usize = 5;
+const SAMPLE_COUNT: usize = 7;
 
 fn identifier(mut state: u64) -> [u8; 32] {
     let mut bytes = [0; 32];
@@ -25,7 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut candidates = Vec::with_capacity(CANDIDATE_COUNT);
     for index in 0..CANDIDATE_COUNT {
         let seed = u64::try_from(index)?;
-        candidates.push(IngestNode::new(NodeId::from_bytes(identifier(seed))));
+        let mut node_id = identifier(seed);
+        node_id[..3].copy_from_slice(&[0x5a, 0xc3, 0x17]);
+        candidates.push(IngestNode::new(NodeId::from_bytes(node_id)));
     }
     let mut clients = Vec::with_capacity(CLIENT_COUNT);
     for index in 0..CLIENT_COUNT {
@@ -33,28 +36,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         clients.push(ClientId::from_bytes(identifier(seed)));
     }
 
-    for algorithm in [
+    let algorithms = [
         AssignmentAlgorithm::SaltedClientHash,
         AssignmentAlgorithm::DisjointClientRanges,
         AssignmentAlgorithm::XorNearest,
         AssignmentAlgorithm::MatchBits,
-    ] {
-        let descriptor = DelegationDescriptor::new(algorithm, candidates.clone(), 7)?;
-        let start = Instant::now();
-        let mut checksum = 0_u64;
-        for _ in 0..ITERATIONS {
-            for client in &clients {
-                for view in 0..3 {
-                    let assigned = descriptor.assign(black_box(*client), view)?;
-                    checksum ^= u64::from(assigned.node_id().as_bytes()[31]);
+    ];
+    for sample in 0..SAMPLE_COUNT {
+        for order in 0..algorithms.len() {
+            let algorithm = algorithms[(order + sample) % algorithms.len()];
+            let descriptor = DelegationDescriptor::new(algorithm, candidates.clone(), 7)?;
+            let start = Instant::now();
+            let mut checksum = 0_u64;
+            for _ in 0..ITERATIONS {
+                for client in &clients {
+                    for view in 0..3 {
+                        let assigned = descriptor.assign(black_box(*client), view)?;
+                        checksum ^= u64::from(assigned.node_id().as_bytes()[31]);
+                    }
                 }
             }
+            let elapsed_ns = start.elapsed().as_nanos();
+            println!(
+                "sample={sample} order={order} algorithm={algorithm:?} assignments={} elapsed_ns={elapsed_ns} checksum={checksum}",
+                CLIENT_COUNT * ITERATIONS * 3
+            );
         }
-        println!(
-            "{algorithm:?}: {} assignments in {:?} (checksum {checksum})",
-            CLIENT_COUNT * ITERATIONS * 3,
-            start.elapsed()
-        );
     }
     Ok(())
 }

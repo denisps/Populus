@@ -50,6 +50,7 @@ pub struct DelegationDescriptor {
     algorithm_version: u8,
     algorithm: AssignmentAlgorithm,
     candidates: Vec<IngestNode>,
+    candidate_common_prefix_bits: u16,
     match_bits: u16,
 }
 
@@ -78,10 +79,12 @@ impl DelegationDescriptor {
         if candidates.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(AssignmentError::DuplicateCandidate);
         }
+        let candidate_common_prefix_bits = common_prefix_bits(&candidates);
         Ok(Self {
             algorithm_version: ASSIGNMENT_VERSION,
             algorithm,
             candidates,
+            candidate_common_prefix_bits,
             match_bits,
         })
     }
@@ -215,9 +218,14 @@ impl IngestAssignment for AssignmentAlgorithm {
             }
             Self::MatchBits => {
                 let target = client_view_hash(client_id, view);
-                closest_matching(candidates, &target, descriptor.match_bits)
-                    .or_else(|| closest_xor(candidates, &target).ok())
-                    .ok_or(AssignmentError::NoCandidates)
+                closest_matching(
+                    candidates,
+                    &target,
+                    descriptor.candidate_common_prefix_bits,
+                    descriptor.match_bits,
+                )
+                .or_else(|| closest_xor(candidates, &target).ok())
+                .ok_or(AssignmentError::NoCandidates)
             }
         }
     }
@@ -334,13 +342,59 @@ fn closest_xor(
 fn closest_matching(
     candidates: &[IngestNode],
     target: &[u8; 32],
+    common_prefix: u16,
     match_bits: u16,
 ) -> Option<IngestNode> {
     candidates
         .iter()
         .copied()
-        .filter(|candidate| shares_prefix(candidate.node_id().as_bytes(), target, match_bits))
+        .filter(|candidate| {
+            matches_client_prefix(
+                candidate.node_id().as_bytes(),
+                target,
+                common_prefix,
+                match_bits,
+            )
+        })
         .min_by_key(|candidate| xor_distance(candidate.node_id().as_bytes(), target))
+}
+
+fn common_prefix_bits(candidates: &[IngestNode]) -> u16 {
+    let Some(first) = candidates.first() else {
+        return 0;
+    };
+    let mut common_bits = usize::from(MATCH_BITS_MAX);
+    for candidate in candidates.iter().skip(1) {
+        let candidate_common_bits = first
+            .node_id()
+            .as_bytes()
+            .iter()
+            .zip(candidate.node_id().as_bytes())
+            .enumerate()
+            .find_map(|(index, (left, right))| {
+                (left != right).then(|| index * 8 + (left ^ right).leading_zeros() as usize)
+            })
+            .unwrap_or(usize::from(MATCH_BITS_MAX));
+        common_bits = common_bits.min(candidate_common_bits);
+    }
+    u16::try_from(common_bits).unwrap_or(MATCH_BITS_MAX)
+}
+
+fn matches_client_prefix(
+    candidate: &[u8; 32],
+    client_hash: &[u8; 32],
+    candidate_offset: u16,
+    bits: u16,
+) -> bool {
+    let bits = bits.min(MATCH_BITS_MAX.saturating_sub(candidate_offset));
+    (0..bits).all(|offset| {
+        let candidate_bit = candidate_offset + offset;
+        let candidate_byte = usize::from(candidate_bit / 8);
+        let candidate_mask = 1 << (7 - candidate_bit % 8);
+        let client_byte = usize::from(offset / 8);
+        let client_mask = 1 << (7 - offset % 8);
+        candidate[candidate_byte] & candidate_mask == client_hash[client_byte] & client_mask
+    })
 }
 
 fn xor_distance(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
@@ -349,19 +403,6 @@ fn xor_distance(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
         *output = left ^ right;
     }
     distance
-}
-
-fn shares_prefix(left: &[u8; 32], right: &[u8; 32], bits: u16) -> bool {
-    let full_bytes = usize::from(bits / 8);
-    let partial_bits = bits % 8;
-    if left[..full_bytes] != right[..full_bytes] {
-        return false;
-    }
-    if partial_bits == 0 {
-        return true;
-    }
-    let mask = u8::MAX << (8 - partial_bits);
-    left[full_bytes] & mask == right[full_bytes] & mask
 }
 
 #[cfg(test)]
@@ -456,7 +497,8 @@ mod tests {
         );
         let destinations = descriptor.assign_views(client).unwrap();
         assert_ne!(destinations[0], destinations[1]);
-        assert!(destinations.contains(&destinations[2]));
+        assert!(descriptor.candidates().contains(&destinations[2]));
+        assert!(destinations[2] == destinations[0] || destinations[2] == destinations[1]);
     }
 
     #[test]
