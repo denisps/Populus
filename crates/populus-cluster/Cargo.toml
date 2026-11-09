@@ -9,6 +9,12 @@ repository.workspace = true
 populus-crypto = { version = "0.1.0", path = "../populus-crypto" }
 populus-sketch = { version = "0.1.0", path = "../populus-sketch" }
 populus-types = { version = "0.1.0", path = "../populus-types" }
+sha2.workspace = true
+
+[[example]]
+name = "ingest_assignment_benchmark"
+path = "examples/ingest_assignment_benchmark.rs"
+test = false
 
 [lints]
 workspace = true

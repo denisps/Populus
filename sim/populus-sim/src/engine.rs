@@ -7,10 +7,12 @@ use crate::report::{ContentSummary, SimulationReport, ViewContentSummary};
 use crate::rng::SeededRandom;
 use crate::workload::{generate_client_ids, generate_contents, generate_node_ids};
 use populus_cluster::{
-    AuthorityComponents, AuthorityMember, AuthorityState, EquivocationProof, MembershipView,
-    SignedAuthorityState, StateResolution, resolve_authority_state, select_authorities,
+    ASSIGNMENT_VERSION, AssignmentAlgorithm, AuthorityComponents, AuthorityMember, AuthorityState,
+    DelegationDescriptor, EquivocationProof, IngestNode, MembershipView, SignedAuthorityState,
+    StateResolution, resolve_authority_state, select_authorities, select_match_bits,
 };
-use populus_crypto::AuthorityKeypair;
+use populus_crypto::{AuthorityKeypair, RoutingIdentifier, routing_key};
+use populus_routing::{BUCKET_CAPACITY, closest_nodes_brute_force};
 use populus_sketch::ClientSketch;
 use populus_types::{ClientId, Epoch, NodeId, RoutingKey};
 use std::cmp::Reverse;
@@ -20,11 +22,9 @@ const REPORT_WINDOW_MS: i128 = 60_000;
 
 /// Runs a deterministic routing/content/sketch workload without sockets or wall-clock time.
 ///
-/// Every client submits one vote for a deterministically selected content in each
-/// of three workload views. Destinations are sampled independently while avoiding
-/// duplicate nodes for a client when at least three nodes are available. This
-/// placement is only a load generator and does not select a protocol assignment
-/// algorithm.
+/// Every client submits one vote for a deterministically selected content in
+/// each of three descriptor-backed assignment views. The selected experimental
+/// candidate places clients among the closest known nodes for that content.
 ///
 /// Node crashes and recoveries occur before vote deliveries at the same timestamp.
 /// A failure is not retried. Clock skew partitions received votes into local
@@ -34,13 +34,59 @@ const REPORT_WINDOW_MS: i128 = 60_000;
 /// # Errors
 ///
 /// Returns an error for invalid distributions or node indices, conflicting
-/// same-time availability events, excessive workload sizes, virtual-time
-/// overflow, invalid generated content, or a routing/oracle disagreement.
+/// same-time availability events, excessive workload sizes, invalid assignment
+/// inputs, virtual-time overflow, invalid generated content, or a routing/oracle
+/// disagreement.
 pub fn run_simulation(config: &SimulationConfig) -> Result<SimulationReport, SimulationError> {
     crate::config::validate_config(config)?;
     run_validated_simulation(config).map_err(|source| SimulationError::Scenario {
         seed: config.seed,
         source: Box::new(source),
+    })
+}
+
+struct AssignmentSetup {
+    descriptors: Vec<DelegationDescriptor>,
+    candidate_count: usize,
+    descriptor_estimated_bytes: Option<usize>,
+    match_bits: u16,
+}
+
+fn prepare_assignments(
+    config: &SimulationConfig,
+    node_ids: &[NodeId],
+    contents: &[ContentSummary],
+) -> Result<AssignmentSetup, SimulationError> {
+    let candidate_count = node_ids.len().min(BUCKET_CAPACITY);
+    let match_bits = if config.assignment_algorithm == AssignmentAlgorithm::MatchBits {
+        select_match_bits(
+            candidate_count,
+            config.offered_votes_per_minute,
+            config.max_votes_per_node_per_minute,
+        )?
+    } else {
+        0
+    };
+    let descriptors: Vec<_> = contents
+        .iter()
+        .map(|content| {
+            let key = routing_key(RoutingIdentifier::Content(&content.content_id));
+            let candidates = closest_nodes_brute_force(&key, node_ids, candidate_count);
+            DelegationDescriptor::new(
+                config.assignment_algorithm,
+                candidates.into_iter().map(IngestNode::new).collect(),
+                match_bits,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    let descriptor_estimated_bytes = descriptors
+        .first()
+        .map(DelegationDescriptor::estimated_encoded_len);
+    Ok(AssignmentSetup {
+        descriptors,
+        candidate_count,
+        descriptor_estimated_bytes,
+        match_bits,
     })
 }
 
@@ -66,6 +112,8 @@ fn run_validated_simulation(
 
     let mut random = SeededRandom::new(config.seed);
     let node_ids = generate_node_ids(config.node_count, &mut random)?;
+    let contents = generate_contents(config, &node_ids)?;
+    let assignment = prepare_assignments(config, &node_ids, &contents)?;
     let client_ids = if config.content_count == 0 {
         Vec::new()
     } else {
@@ -94,16 +142,17 @@ fn run_validated_simulation(
         }
     }
 
-    let contents = generate_contents(config, &node_ids)?;
     let mut events = ScheduledEvents::new();
     events.schedule_failures(&config.failure_schedule)?;
     events.schedule_lifecycle(&config.lifecycle_schedule)?;
     events.schedule_partitions(&config.partition_schedule)?;
     let mut message_id = 0_usize;
-    let expected_by_content = crate::workload::schedule_votes(
+    let (expected_by_content, assignment_loads) = crate::workload::schedule_votes(
         config,
         client_ids,
         &mut random,
+        &node_ids,
+        &assignment.descriptors,
         |at_ms, source, node, client, content, view, loss_dropped| {
             let current_message_id = message_id;
             message_id = message_id
@@ -145,6 +194,12 @@ fn run_validated_simulation(
         node_count: config.node_count,
         client_count: config.client_count,
         content_count: config.content_count,
+        assignment_algorithm: config.assignment_algorithm,
+        assignment_version: ASSIGNMENT_VERSION,
+        assignment_candidate_count: assignment.candidate_count,
+        assignment_descriptor_estimated_bytes: assignment.descriptor_estimated_bytes,
+        assignment_match_bits: assignment.match_bits,
+        assignment_loads,
         sent_messages: message_count,
         delivered_messages: metrics.delivered_messages,
         dropped_messages: metrics.dropped_messages,

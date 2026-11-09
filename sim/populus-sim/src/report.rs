@@ -1,3 +1,4 @@
+use populus_cluster::AssignmentAlgorithm;
 use populus_types::{ContentId, NodeId};
 use std::fmt;
 
@@ -12,6 +13,18 @@ pub struct SimulationReport {
     pub client_count: usize,
     /// Input content count.
     pub content_count: usize,
+    /// Experimental assignment candidate exercised by this run.
+    pub assignment_algorithm: AssignmentAlgorithm,
+    /// Experimental assignment descriptor version.
+    pub assignment_version: u8,
+    /// Number of nearby ingest candidates in each content's descriptor.
+    pub assignment_candidate_count: usize,
+    /// Estimated descriptor bytes, absent when the run has no contents.
+    pub assignment_descriptor_estimated_bytes: Option<usize>,
+    /// `MatchBits` width selected from the content candidate population and rate.
+    pub assignment_match_bits: u16,
+    /// Number of client destinations assigned to each node in each view.
+    pub assignment_loads: Vec<AssignmentLoad>,
     /// Number of initially scheduled vote messages.
     pub sent_messages: usize,
     /// Number of vote insertions, including duplicate deliveries and replays.
@@ -52,6 +65,18 @@ impl fmt::Debug for SimulationReport {
             .field("node_count", &self.node_count)
             .field("client_count", &self.client_count)
             .field("content_count", &self.content_count)
+            .field("assignment_algorithm", &self.assignment_algorithm)
+            .field("assignment_version", &self.assignment_version)
+            .field(
+                "assignment_candidate_count",
+                &self.assignment_candidate_count,
+            )
+            .field(
+                "assignment_descriptor_estimated_bytes",
+                &self.assignment_descriptor_estimated_bytes,
+            )
+            .field("assignment_match_bits", &self.assignment_match_bits)
+            .field("assignment_loads_count", &self.assignment_loads.len())
             .field("sent_messages", &self.sent_messages)
             .field("delivered_messages", &self.delivered_messages)
             .field("dropped_messages", &self.dropped_messages)
@@ -69,6 +94,15 @@ impl fmt::Debug for SimulationReport {
             .field("view_content_count", &self.view_content.len())
             .finish()
     }
+}
+
+/// Assigned workload for one ingest candidate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssignmentLoad {
+    /// Populus node identity selected for ingest.
+    pub node_id: NodeId,
+    /// Number of client assignments received in each of the three views.
+    pub assignments_by_view: [usize; 3],
 }
 
 /// Content generated and validated by the content and routing implementations.
@@ -96,7 +130,7 @@ impl fmt::Debug for ContentSummary {
 /// Aggregated ingest workload observed for one view and content.
 #[derive(Clone, PartialEq)]
 pub struct ViewContentSummary {
-    /// Zero-based shuffled workload view.
+    /// Zero-based delegated-assignment view.
     pub view: usize,
     /// Content identifier receiving this view's client votes.
     pub content_id: ContentId,

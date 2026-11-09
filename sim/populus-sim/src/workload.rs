@@ -1,14 +1,14 @@
-//! Phase-5 synthetic workload generation.
-//!
-//! Destination selection is only a load generator; it is not delegated-ingest protocol assignment.
+//! Seeded workload generation and Phase-9 assignment placement.
 
 use crate::config::{PACKET_LOSS_SCALE, SimulationConfig, SimulationError, VIEW_COUNT};
-use crate::report::ContentSummary;
+use crate::report::{AssignmentLoad, ContentSummary};
 use crate::rng::{SeededRandom, random_identifier};
+use populus_cluster::DelegationDescriptor;
 use populus_content::{ContentBody, SignedContent};
 use populus_crypto::{RoutingIdentifier, routing_key};
 use populus_routing::{BUCKET_CAPACITY, InsertError, RoutingTable, closest_nodes_brute_force};
 use populus_types::{ClientId, NodeId, RoutingKey};
+use std::collections::BTreeMap;
 
 pub(super) fn generate_contents(
     config: &SimulationConfig,
@@ -86,29 +86,12 @@ pub(super) fn content_payload(seed: u64, index: usize) -> Result<Vec<u8>, Simula
     Ok(payload)
 }
 
-pub(super) fn choose_destinations(
-    node_count: usize,
-    random: &mut SeededRandom,
-) -> Result<Vec<usize>, SimulationError> {
-    let destination_count = node_count.min(VIEW_COUNT);
-    let mut destinations = Vec::with_capacity(VIEW_COUNT);
-    for _ in 0..destination_count {
-        let mut candidate = random.index(node_count)?;
-        while destinations.contains(&candidate) {
-            candidate = (candidate + 1) % node_count;
-        }
-        destinations.push(candidate);
-    }
-    while destinations.len() < VIEW_COUNT {
-        destinations.push(destinations[destinations.len() % destination_count]);
-    }
-    Ok(destinations)
-}
-
 pub(super) fn schedule_votes(
     config: &SimulationConfig,
     clients: Vec<ClientId>,
     random: &mut SeededRandom,
+    node_ids: &[NodeId],
+    descriptors: &[DelegationDescriptor],
     mut schedule: impl FnMut(
         u64,
         usize,
@@ -118,16 +101,31 @@ pub(super) fn schedule_votes(
         u8,
         bool,
     ) -> Result<(), SimulationError>,
-) -> Result<Vec<usize>, SimulationError> {
+) -> Result<(Vec<usize>, Vec<AssignmentLoad>), SimulationError> {
     let mut expected_by_content = vec![0_usize; config.content_count];
+    let node_index_by_id: BTreeMap<_, _> = node_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, node_id)| (node_id, index))
+        .collect();
+    let mut assignments_by_node = vec![[0; VIEW_COUNT]; node_ids.len()];
     // At rate R, one millisecond is R ticks and one payload occupies
     // payload_bytes * 1,000 ticks. This keeps fractional-ms egress exact.
     let mut egress_free_ticks = vec![0_u128; config.node_count];
     for (client_index, client_id) in clients.into_iter().enumerate() {
         let content_index = client_index % config.content_count;
         expected_by_content[content_index] += 1;
-        let destinations = choose_destinations(config.node_count, random)?;
+        let descriptor = descriptors
+            .get(content_index)
+            .ok_or(SimulationError::RoutingInvariant)?;
+        let destinations = descriptor.assign_views(client_id)?;
         for (view, node) in destinations.into_iter().enumerate() {
+            let node = node_index_by_id
+                .get(&node.node_id())
+                .copied()
+                .ok_or(SimulationError::RoutingInvariant)?;
+            assignments_by_node[node][view] += 1;
             let mut latency_ms = config.latency.sample(random);
             if let Some(jitter) = config.jitter {
                 latency_ms = latency_ms
@@ -172,5 +170,14 @@ pub(super) fn schedule_votes(
             )?;
         }
     }
-    Ok(expected_by_content)
+    let loads = node_ids
+        .iter()
+        .copied()
+        .zip(assignments_by_node)
+        .map(|(node_id, assignments_by_view)| AssignmentLoad {
+            node_id,
+            assignments_by_view,
+        })
+        .collect();
+    Ok((expected_by_content, loads))
 }

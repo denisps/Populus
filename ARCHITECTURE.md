@@ -921,19 +921,34 @@ failure redundancy
 
 # 16. Client-to-ingest assignment
 
-The exact v1 assignment algorithm remains under simulation.
-
-Candidates include:
+The exact v1 assignment algorithm remains under simulation. The Phase 9
+experiment exposes four candidates behind `IngestAssignment`:
 
 ```text
-MatchBits(NodeId, H(ClientId || view), selected_bits)
-
-MatchBits(NodeId, different disjoint ClientId ranges)
-
-XOR-nearest selection from delegated candidates
-
-rendezvous-style selection
+SaltedClientHash: H(ClientId || view) modulo canonical candidate order
+DisjointClientRanges: one 64-bit ClientId range per view
+XorNearest: nearest delegated NodeId to H(ClientId || view)
+MatchBits: match hash-prefix bits against NodeId suffix after shared candidate prefix
 ```
+
+The experimental hash target is
+`SHA-256("populus/ingest-assignment/v1" || ClientId[32] || view[1])`.
+SaltedClientHash maps its first eight output bytes into canonical candidate
+order; XOR-based candidates compare the complete digest and NodeId bytes.
+DisjointClientRanges reads one consecutive 64-bit ClientId range per view.
+
+Each descriptor carries its candidate algorithm, canonical sorted candidate
+NodeIds, and MatchBits width. The simulator builds a descriptor per content
+from the closest known nodes in that content's RoutingKey neighborhood. A
+descriptor's candidate list and algorithm are experimental inputs, not a frozen
+wire encoding.
+
+The three-view helper resolves collisions by scanning the canonical candidate
+list from the preferred node. It produces distinct nodes whenever the candidate
+population permits; a smaller pool uses each available candidate before
+repeating one. When at least three candidates exist, this collision rule is
+deterministic and prevents a single candidate from being selected in multiple
+views for one client.
 
 Desired properties:
 
@@ -950,7 +965,16 @@ resistant to one malicious node capturing multiple views
 
 The algorithm and version are part of the delegation descriptor.
 
-Therefore it can be experimentally replaced before protocol v1 freezes.
+Therefore it can be experimentally replaced before protocol v1 freezes. MatchBits
+width is derived from the observed candidate count, offered votes per minute,
+and per-node rate target. The bits are compared against the client hash's
+leading bits at an offset equal to the candidate set's longest common NodeId
+prefix, so nearby candidates remain distinguishable in larger neighborhoods.
+Empty sparse prefixes fall back to the nearest candidate; `2^bits` is never
+treated as the available node count. The simulator reports per-node/per-view
+assignment loads and an estimated descriptor size. That size estimate counts
+four experimental header bytes and the candidate NodeIds only; it is not a
+wire-size commitment.
 
 ---
 
