@@ -393,7 +393,8 @@ fn matches_client_prefix(
         let candidate_mask = 1 << (7 - candidate_bit % 8);
         let client_byte = usize::from(offset / 8);
         let client_mask = 1 << (7 - offset % 8);
-        candidate[candidate_byte] & candidate_mask == client_hash[client_byte] & client_mask
+        (candidate[candidate_byte] & candidate_mask != 0)
+            == (client_hash[client_byte] & client_mask != 0)
     })
 }
 
@@ -654,6 +655,41 @@ mod tests {
                 .expect("sparse prefixes fall back to a known candidate");
             assert!(descriptor.candidates().contains(&assigned));
         }
+    }
+
+    #[test]
+    fn match_bits_compares_bit_values_after_a_non_byte_aligned_common_prefix() {
+        let mut lower = [0; 32];
+        lower[0] = 0xa0;
+        let mut higher = [0; 32];
+        higher[0] = 0xb0;
+        let descriptor = descriptor(
+            AssignmentAlgorithm::MatchBits,
+            vec![
+                IngestNode::new(NodeId::from_bytes(lower)),
+                IngestNode::new(NodeId::from_bytes(higher)),
+            ],
+            1,
+        );
+        assert_eq!(descriptor.candidate_common_prefix_bits, 3);
+
+        let client_id = (0..=u8::MAX)
+            .map(|byte| ClientId::from_bytes([byte; 32]))
+            .find(|client_id| client_view_hash(*client_id, 0)[0] & 0xe0 == 0x80)
+            .expect("a test client hashes to the required prefix");
+
+        assert_eq!(
+            AssignmentAlgorithm::XorNearest
+                .assign(client_id, 0, &descriptor)
+                .unwrap(),
+            IngestNode::new(NodeId::from_bytes(lower))
+        );
+        assert_eq!(
+            AssignmentAlgorithm::MatchBits
+                .assign(client_id, 0, &descriptor)
+                .unwrap(),
+            IngestNode::new(NodeId::from_bytes(higher))
+        );
     }
 
     #[test]
