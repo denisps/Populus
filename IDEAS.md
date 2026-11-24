@@ -75,3 +75,9 @@
   unknown versions as typed errors, and leave successful events typed. Do
   not freeze those bytes until the first authority message exists; until
   then, do not invent a parallel envelope in the transport adapter.
+- Make direct-ingest acceptance policy consistent across an authority
+  membership. Authorities currently persist their own grace and clock-skew
+  settings, so mismatched configuration can make the same boundary-delayed
+  vote acceptable to some members and finalized at others. Define how policy
+  versions are agreed or safely updated before relying on uniform daily
+  acknowledgements.

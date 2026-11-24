@@ -189,12 +189,6 @@ fn persistent_like_retries_until_ack_and_skips_days_offline() {
         "a later UTC day does not discard an unacknowledged vote"
     );
     let first_ack = signed_ack(first, &membership, &keys, 0);
-    println!(
-        "vote_wire={} ack_message={} ack_wire={}",
-        hex(&first.canonical_bytes()),
-        hex(&first_ack.message()),
-        hex(&first_ack.canonical_bytes())
-    );
     assert!(
         !like
             .acknowledge(&first_ack, &membership)
@@ -272,6 +266,28 @@ fn persistent_like_retries_until_ack_and_skips_days_offline() {
     );
     assert_eq!(
         like.acknowledge(&first_ack, &membership),
+        Err(DirectIngestError::UnexpectedAcknowledgement)
+    );
+}
+
+#[test]
+fn unliking_discards_an_unacknowledged_vote() {
+    let content_id = content(9);
+    let day = UtcDay::new(10);
+    let (membership, keys) = make_membership(content_id, 1, 0);
+    let mut like = PersistentLike::new(content_id, true);
+    let pending = like
+        .vote_when_online(client(9), day, &membership)
+        .expect("membership matches the content")
+        .expect("online liked client emits today's vote");
+    let acknowledgement = signed_ack(pending, &membership, &keys, 0);
+
+    like.set_liked(false);
+
+    assert_eq!(like.pending_authorities(), []);
+    assert_eq!(like.vote_when_online(client(9), day, &membership), Ok(None));
+    assert_eq!(
+        like.acknowledge(&acknowledgement, &membership),
         Err(DirectIngestError::UnexpectedAcknowledgement)
     );
 }

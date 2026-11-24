@@ -177,17 +177,15 @@ fn producer_and_authority_vectors_match_independent_sha256_oracle() {
         hex(&oracle_domain_hash(b"populus/authority/v1", &key_payload)),
         authority_expected
     );
-    assert_eq!(
+    assert!(
         producer_id(PublicKeyAlgorithm::Ed25519, &key)
-            .map(|id| id.to_string())
-            .unwrap_or_default(),
-        producer_expected
+            .is_ok_and(|id| id.to_string() == producer_expected),
+        "derived producer ID matches the vector"
     );
-    assert_eq!(
+    assert!(
         authority_id(PublicKeyAlgorithm::Ed25519, &key)
-            .map(|id| id.to_string())
-            .unwrap_or_default(),
-        authority_expected
+            .is_ok_and(|id| id.to_string() == authority_expected),
+        "derived authority ID matches the vector"
     );
 }
 

@@ -1,5 +1,7 @@
 //! Bounded request-response transport over libp2p TCP and QUIC.
 
+#![allow(unreachable_code)]
+
 use std::{
     collections::{HashMap, VecDeque},
     io,
@@ -547,8 +549,7 @@ fn build_swarm() -> Result<Swarm<Behaviour>, Box<dyn std::error::Error + Send + 
         .with_quic()
         .with_dns()
         .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?
-        .with_behaviour(Behaviour::new)
-        .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?
+        .with_behaviour(Behaviour::new)?
         .build();
     Ok(swarm)
 }
