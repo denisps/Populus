@@ -71,6 +71,16 @@ distance to the fixed routing key before constructing the view. The signature
 preimage is the `populus/authority-state-signature/v1` domain, the signer's
 32-byte `AuthorityId`, and the exact `canonical_state` bytes.
 
+## Delegated-ingest vector v1
+
+`delegated-ingest-v1.txt` fixes one canonical Phase 10 report, the signed
+acknowledgement preimage, and the complete Ed25519 acknowledgement. The
+content uses digest `0x05` repeated 32 times, the client ID is `0x09` repeated
+32 times, the UTC day is 10, the reporting node ID is `0x2a` repeated 32
+times, and the report is for view 1 with sequence 1. Four authority keys use
+seeds `0x01` through `0x04` repeated to 32 bytes, with membership generation
+1; the first canonical membership member signs the acknowledgement.
+
 ## Content vectors v1
 
 `content-v1.json` is the language-independent Phase 3 vector for canonical

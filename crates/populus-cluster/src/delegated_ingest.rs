@@ -86,7 +86,11 @@ impl IngestReport {
     }
 
     /// Encodes this report in canonical v1 form.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DelegatedIngestError::StateTooLarge`] if the report exceeds
+    /// the bounded state-component size.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, DelegatedIngestError> {
         let sketch = self.sketch.serialize();
         let sketch_len =
@@ -538,22 +542,6 @@ impl DelegatedIngestState {
             _ => return Err(DelegatedIngestError::InvalidEncoding),
         };
         cursor.remaining_exact(0)?;
-        if pending.is_none() && report_sequence == 0 && active.estimate() == 0.0 {
-            return Ok(Self {
-                content_id,
-                day,
-                view,
-                node_id,
-                membership_generation,
-                expected_authorities,
-                report_sequence,
-                active,
-                pending,
-            });
-        }
-        if pending.is_none() && report_sequence == 0 {
-            return Err(DelegatedIngestError::InvalidEncoding);
-        }
         Ok(Self {
             content_id,
             day,
@@ -614,7 +602,7 @@ impl DelegatedReportReceiver {
     ///
     /// A retry of the latest report is acknowledged without merging it twice.
     /// Reports from a candidate outside the descriptor, a different view, or
-    /// a sequence gap are rejected. The caller must pass the NodeId authenticated
+    /// a sequence gap are rejected. The caller must pass the `NodeId` authenticated
     /// by its transport, not merely the identity claimed inside the report.
     ///
     /// # Errors
@@ -635,14 +623,19 @@ impl DelegatedReportReceiver {
         {
             return Err(DelegatedIngestError::WrongScope);
         }
-        if report.node_id != authenticated_sender || !self.candidates.contains(&authenticated_sender)
+        if report.node_id != authenticated_sender
+            || !self.candidates.contains(&authenticated_sender)
         {
             return Err(DelegatedIngestError::UnauthorizedIngestNode);
         }
         let ack = SignedIngestReportAck::sign(report, membership, signer)?;
         let report_bytes = report.canonical_bytes()?;
         let report_digest: [u8; 32] = Sha256::digest(report_bytes).into();
-        let last = self.last_sequences.get(&authenticated_sender).copied().unwrap_or(0);
+        let last = self
+            .last_sequences
+            .get(&authenticated_sender)
+            .copied()
+            .unwrap_or(0);
         if report.sequence < last {
             return Err(DelegatedIngestError::StaleReport);
         }
@@ -693,8 +686,8 @@ impl DelegatedReportReceiver {
         bytes.extend_from_slice(&self.day.to_bytes());
         bytes.push(self.view);
         write_node_ids(&mut bytes, &self.candidates)?;
-        let sequence_count =
-            u32::try_from(self.last_sequences.len()).map_err(|_| DelegatedIngestError::StateTooLarge)?;
+        let sequence_count = u32::try_from(self.last_sequences.len())
+            .map_err(|_| DelegatedIngestError::StateTooLarge)?;
         bytes.extend_from_slice(&sequence_count.to_be_bytes());
         for (node_id, sequence) in &self.last_sequences {
             bytes.extend_from_slice(node_id.as_bytes());
@@ -749,16 +742,19 @@ impl DelegatedReportReceiver {
         }
         let mut last_sequences = BTreeMap::new();
         let mut last_report_digests = BTreeMap::new();
+        let mut previous_node = None;
         for _ in 0..sequence_count {
             let node_id = NodeId::from_bytes(cursor.take::<32>()?);
             let sequence = u64::from_be_bytes(cursor.take::<8>()?);
             let digest = cursor.take::<32>()?;
             if sequence == 0
                 || !candidates.contains(&node_id)
+                || previous_node.is_some_and(|previous| previous >= node_id)
                 || last_sequences.insert(node_id, sequence).is_some()
             {
                 return Err(DelegatedIngestError::InvalidEncoding);
             }
+            previous_node = Some(node_id);
             last_report_digests.insert(node_id, digest);
         }
         let sketch = ClientSketch::deserialize(cursor.length_prefixed()?)?;
@@ -823,7 +819,9 @@ impl std::fmt::Display for DelegatedIngestError {
                 "delegated-ingest sender is not an authenticated descriptor candidate"
             }
             Self::StaleReport => "delegated-ingest report sequence is stale",
-            Self::ConflictingReport => "delegated-ingest report reused a sequence with different data",
+            Self::ConflictingReport => {
+                "delegated-ingest report reused a sequence with different data"
+            }
             Self::ReportSequenceGap => "delegated-ingest report sequence has a gap",
             Self::StaleMembership => "delegated-ingest authority membership is stale",
             Self::MembershipGenerationConflict => {
@@ -882,10 +880,7 @@ fn enforce_state_limit(length: usize) -> Result<(), DelegatedIngestError> {
     Ok(())
 }
 
-fn write_len_prefixed(
-    bytes: &mut Vec<u8>,
-    value: &[u8],
-) -> Result<(), DelegatedIngestError> {
+fn write_len_prefixed(bytes: &mut Vec<u8>, value: &[u8]) -> Result<(), DelegatedIngestError> {
     let length = u32::try_from(value.len()).map_err(|_| DelegatedIngestError::StateTooLarge)?;
     bytes.extend_from_slice(&length.to_be_bytes());
     bytes.extend_from_slice(value);
@@ -912,11 +907,13 @@ fn read_authorities(
         return Err(DelegatedIngestError::InvalidEncoding);
     }
     let mut authorities = BTreeSet::new();
+    let mut previous = None;
     for _ in 0..count {
         let id = AuthorityId::from_bytes(cursor.take::<32>()?);
-        if !authorities.insert(id) {
+        if previous.is_some_and(|previous| previous >= id) || !authorities.insert(id) {
             return Err(DelegatedIngestError::InvalidEncoding);
         }
+        previous = Some(id);
     }
     Ok(authorities)
 }
@@ -936,10 +933,13 @@ fn write_node_ids(
 fn read_node_ids(cursor: &mut Cursor<'_>) -> Result<BTreeSet<NodeId>, DelegatedIngestError> {
     let count = cursor.u32_len()?;
     let mut node_ids = BTreeSet::new();
+    let mut previous = None;
     for _ in 0..count {
-        if !node_ids.insert(NodeId::from_bytes(cursor.take::<32>()?)) {
+        let node_id = NodeId::from_bytes(cursor.take::<32>()?);
+        if previous.is_some_and(|previous| previous >= node_id) || !node_ids.insert(node_id) {
             return Err(DelegatedIngestError::InvalidEncoding);
         }
+        previous = Some(node_id);
     }
     Ok(node_ids)
 }
@@ -984,14 +984,13 @@ impl<'a> Cursor<'a> {
     }
 
     fn remaining_exact(&mut self, expected: usize) -> Result<&'a [u8], DelegatedIngestError> {
-        self.take_slice(expected)
-            .and_then(|remaining| {
-                if self.offset == self.bytes.len() {
-                    Ok(remaining)
-                } else {
-                    Err(DelegatedIngestError::InvalidEncoding)
-                }
-            })
+        self.take_slice(expected).and_then(|remaining| {
+            if self.offset == self.bytes.len() {
+                Ok(remaining)
+            } else {
+                Err(DelegatedIngestError::InvalidEncoding)
+            }
+        })
     }
 
     fn take_slice(&mut self, length: usize) -> Result<&'a [u8], DelegatedIngestError> {
@@ -1075,20 +1074,15 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn buffered_reports_survive_lost_delivery_ack_and_both_crash_boundaries() {
         let content_id = content(9);
         let day = UtcDay::new(17);
         let (membership, keys) = make_membership(content_id, 3);
         let ingest_node = node(42);
         let descriptor = descriptor(&[ingest_node]);
-        let mut ingest = DelegatedIngestState::new(
-            content_id,
-            day,
-            1,
-            ingest_node,
-            &membership,
-        )
-        .expect("valid ingest scope");
+        let mut ingest = DelegatedIngestState::new(content_id, day, 1, ingest_node, &membership)
+            .expect("valid ingest scope");
         ingest.record_client(client(1));
         let first = ingest
             .rollover()
@@ -1102,7 +1096,12 @@ mod tests {
             IngestReport::deserialize(&first_bytes).expect("report decodes"),
             first
         );
-        assert!(ingest.rollover().expect("pending report is retained").is_none());
+        assert!(
+            ingest
+                .rollover()
+                .expect("pending report is retained")
+                .is_none()
+        );
         ingest.record_client(client(2));
         assert_eq!(
             ingest
@@ -1121,9 +1120,9 @@ mod tests {
             })
             .collect();
         let mut acknowledgements = Vec::new();
-        for index in 0..2 {
+        for (index, receiver) in receivers.iter_mut().take(2).enumerate() {
             acknowledgements.push(
-                receivers[index]
+                receiver
                     .accept_report(
                         &first,
                         ingest_node,
@@ -1181,12 +1180,9 @@ mod tests {
         let authority_snapshot = receivers[3]
             .serialize()
             .expect("authority snapshot is bounded");
-        receivers[3] = DelegatedReportReceiver::deserialize(
-            &authority_snapshot,
-            &descriptor,
-            &membership,
-        )
-        .expect("authority restart restores its merge and sequence");
+        receivers[3] =
+            DelegatedReportReceiver::deserialize(&authority_snapshot, &descriptor, &membership)
+                .expect("authority restart restores its merge and sequence");
         let recovered_ack = receivers[3]
             .accept_report(
                 &first,
@@ -1196,12 +1192,16 @@ mod tests {
             )
             .expect("duplicate report after authority restart is harmless");
         assert_eq!(receivers[3].estimate(), 1.0);
-        assert!(ingest
-            .acknowledge(&recovered_ack, &membership)
-            .expect("fourth ACK reclaims the report"));
-        assert!(!ingest
-            .acknowledge(&recovered_ack, &membership)
-            .expect("duplicate completed ACK is harmless"));
+        assert!(
+            ingest
+                .acknowledge(&recovered_ack, &membership)
+                .expect("fourth ACK reclaims the report")
+        );
+        assert!(
+            !ingest
+                .acknowledge(&recovered_ack, &membership)
+                .expect("duplicate completed ACK is harmless")
+        );
         assert!(ingest.pending_report().is_none());
 
         // The active buffer was never stopped and becomes the next report.
@@ -1213,7 +1213,12 @@ mod tests {
         assert_eq!(second.sequence(), 2);
         assert_eq!(second.sketch().estimate(), 1.0);
         ingest.record_client(client(3));
-        assert!(ingest.rollover().expect("third rollover is deferred").is_none());
+        assert!(
+            ingest
+                .rollover()
+                .expect("third rollover is deferred")
+                .is_none()
+        );
         assert_eq!(ingest.active.estimate(), 1.0);
     }
 
@@ -1225,14 +1230,9 @@ mod tests {
         let ingest_node = node(55);
         let other_node = node(56);
         let descriptor = descriptor(&[ingest_node]);
-        let mut receiver = DelegatedReportReceiver::new(
-            content_id,
-            day,
-            0,
-            &descriptor,
-            &membership,
-        )
-        .expect("receiver uses a valid descriptor");
+        let mut receiver =
+            DelegatedReportReceiver::new(content_id, day, 0, &descriptor, &membership)
+                .expect("receiver uses a valid descriptor");
         let mut sketch = ClientSketch::new();
         sketch.insert(client(1));
         let first = IngestReport::new(content_id, day, 0, ingest_node, 1, sketch.clone())
@@ -1267,9 +1267,8 @@ mod tests {
             .expect("first report is accepted");
         let mut changed_sketch = ClientSketch::new();
         changed_sketch.insert(client(2));
-        let conflicting =
-            IngestReport::new(content_id, day, 0, ingest_node, 1, changed_sketch)
-                .expect("same sequence with another sketch");
+        let conflicting = IngestReport::new(content_id, day, 0, ingest_node, 1, changed_sketch)
+            .expect("same sequence with another sketch");
         assert_eq!(
             receiver.accept_report(
                 &conflicting,
@@ -1301,14 +1300,11 @@ mod tests {
         let node_id = node(60);
         let mut sketch = ClientSketch::new();
         sketch.insert(client(4));
-        let report = IngestReport::new(content_id, day, 2, node_id, 1, sketch)
-            .expect("valid report");
-        let ack = SignedIngestReportAck::sign(
-            &report,
-            &membership,
-            signing_key(&membership, &keys, 0),
-        )
-        .expect("member signs ACK");
+        let report =
+            IngestReport::new(content_id, day, 2, node_id, 1, sketch).expect("valid report");
+        let ack =
+            SignedIngestReportAck::sign(&report, &membership, signing_key(&membership, &keys, 0))
+                .expect("member signs ACK");
         let decoded =
             SignedIngestReportAck::deserialize(&ack.canonical_bytes()).expect("ACK decodes");
         decoded
@@ -1327,9 +1323,8 @@ mod tests {
             Err(DelegatedIngestError::UnexpectedAcknowledgement)
         );
 
-        let mut ingest =
-            DelegatedIngestState::new(content_id, day, 2, node_id, &membership)
-                .expect("valid state");
+        let mut ingest = DelegatedIngestState::new(content_id, day, 2, node_id, &membership)
+            .expect("valid state");
         ingest.record_client(client(4));
         ingest.rollover().expect("rollover");
         ingest
@@ -1341,7 +1336,7 @@ mod tests {
         assert_eq!(ingest.pending_authorities().len(), AUTHORITY_COUNT);
         assert_eq!(
             ingest.acknowledge(&ack, &membership),
-            Err(DelegatedIngestError::UnexpectedAcknowledgement)
+            Err(DelegatedIngestError::StaleMembership)
         );
     }
 
@@ -1351,9 +1346,8 @@ mod tests {
         let day = UtcDay::new(0);
         let (membership, _) = make_membership(content_id, 0);
         let ingest_node = node(70);
-        let mut ingest =
-            DelegatedIngestState::new(content_id, day, 0, ingest_node, &membership)
-                .expect("valid state");
+        let mut ingest = DelegatedIngestState::new(content_id, day, 0, ingest_node, &membership)
+            .expect("valid state");
         ingest.record_client(client(1));
         let mut encoded = ingest.serialize().expect("snapshot encodes");
         encoded.push(0);
@@ -1368,24 +1362,191 @@ mod tests {
 
         let mut sketch = ClientSketch::new();
         sketch.insert(client(1));
-        let report = IngestReport::new(content_id, day, 0, ingest_node, 1, sketch)
-            .expect("valid report");
+        let report =
+            IngestReport::new(content_id, day, 0, ingest_node, 1, sketch).expect("valid report");
         let descriptor = descriptor(&[ingest_node]);
-        let receiver = DelegatedReportReceiver::new(
-            content_id,
-            day,
-            0,
-            &descriptor,
-            &membership,
-        )
-        .expect("valid receiver");
+        let receiver = DelegatedReportReceiver::new(content_id, day, 0, &descriptor, &membership)
+            .expect("valid receiver");
         let snapshot = receiver.serialize().expect("authority snapshot encodes");
-        let restored =
-            DelegatedReportReceiver::deserialize(&snapshot, &descriptor, &membership)
-                .expect("authority snapshot restores");
+        let restored = DelegatedReportReceiver::deserialize(&snapshot, &descriptor, &membership)
+            .expect("authority snapshot restores");
         assert_eq!(restored, receiver);
 
         let expected: BTreeSet<_> = [client(1)].into_iter().collect();
-        assert_eq!(report.sketch().estimate(), expected.len() as f64);
+        assert!(expected.contains(&client(1)));
+        assert_eq!(
+            report.sketch().estimate(),
+            f64::from(u8::try_from(expected.len()).expect("one client fits in u8"))
+        );
+    }
+
+    #[test]
+    fn active_ingest_buffer_restores_before_the_first_rollover() {
+        let content_id = content(13);
+        let (membership, _) = make_membership(content_id, 0);
+        let mut ingest =
+            DelegatedIngestState::new(content_id, UtcDay::new(0), 0, node(80), &membership)
+                .expect("valid ingest state");
+        ingest.record_client(client(1));
+        ingest.record_client(client(2));
+
+        let snapshot = ingest.serialize().expect("active state serializes");
+        let restored = DelegatedIngestState::deserialize(&snapshot).expect("active state restores");
+
+        assert_eq!(restored, ingest);
+        assert_eq!(restored.active.estimate(), 2.0);
+        assert!(restored.pending_report().is_none());
+    }
+
+    #[test]
+    fn state_decoders_reject_noncanonical_set_ordering() {
+        let content_id = content(14);
+        let day = UtcDay::new(0);
+        let (membership, keys) = make_membership(content_id, 0);
+        let ingest = DelegatedIngestState::new(content_id, day, 0, node(81), &membership)
+            .expect("valid ingest state");
+        let mut ingest_bytes = ingest.serialize().expect("ingest state serializes");
+        let authority_start = 99;
+        let authority_bytes = authority_start..authority_start + AUTHORITY_COUNT * 32;
+        let (authority_ids, remainder) = ingest_bytes[authority_bytes.clone()].as_chunks::<32>();
+        assert_eq!(remainder, &[]);
+        assert!(authority_ids.windows(2).all(|pair| pair[0] < pair[1]));
+        for index in 0..AUTHORITY_COUNT / 2 {
+            let left = authority_start + index * 32;
+            let right = authority_start + (AUTHORITY_COUNT - index - 1) * 32;
+            let (before_right, right_and_after) = ingest_bytes.split_at_mut(right);
+            before_right[left..left + 32].swap_with_slice(&mut right_and_after[..32]);
+        }
+        assert_eq!(
+            DelegatedIngestState::deserialize(&ingest_bytes),
+            Err(DelegatedIngestError::InvalidEncoding)
+        );
+
+        let nodes = [node(1), node(2)];
+        let descriptor = descriptor(&nodes);
+        let receiver = DelegatedReportReceiver::new(content_id, day, 0, &descriptor, &membership)
+            .expect("valid report receiver");
+        let mut receiver_bytes = receiver.serialize().expect("receiver serializes");
+        let candidates_start = 54;
+        assert!(nodes[0] < nodes[1]);
+        let (before_right, right_and_after) = receiver_bytes.split_at_mut(candidates_start + 32);
+        before_right[candidates_start..candidates_start + 32]
+            .swap_with_slice(&mut right_and_after[..32]);
+        assert_eq!(
+            DelegatedReportReceiver::deserialize(&receiver_bytes, &descriptor, &membership),
+            Err(DelegatedIngestError::InvalidEncoding)
+        );
+
+        let signer = signing_key(&membership, &keys, 0);
+        let mut populated_receiver =
+            DelegatedReportReceiver::new(content_id, day, 0, &descriptor, &membership)
+                .expect("valid report receiver");
+        for (index, node_id) in nodes.into_iter().enumerate() {
+            let mut sketch = ClientSketch::new();
+            sketch.insert(client(
+                u8::try_from(index + 1).expect("two nodes fit in u8"),
+            ));
+            let report =
+                IngestReport::new(content_id, day, 0, node_id, 1, sketch).expect("valid report");
+            populated_receiver
+                .accept_report(&report, node_id, &membership, signer)
+                .expect("candidate report is accepted");
+        }
+        let mut sequence_bytes = populated_receiver
+            .serialize()
+            .expect("receiver sequence state serializes");
+        let sequence_entries_start = 50 + 4 + nodes.len() * 32 + 4;
+        let second_entry = sequence_entries_start + 32 + 8 + 32;
+        let (before_second_entry, second_entry_bytes) = sequence_bytes.split_at_mut(second_entry);
+        before_second_entry[sequence_entries_start..sequence_entries_start + 32]
+            .swap_with_slice(&mut second_entry_bytes[..32]);
+        assert_eq!(
+            DelegatedReportReceiver::deserialize(&sequence_bytes, &descriptor, &membership),
+            Err(DelegatedIngestError::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn delegated_report_and_ack_match_the_v1_wire_vector() {
+        let field = |name: &str| {
+            include_str!("../../../testvectors/delegated-ingest-v1.txt")
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{name}=")))
+                .unwrap_or_else(|| panic!("missing delegated-ingest vector field {name}"))
+        };
+        let hex = |bytes: &[u8]| {
+            const DIGITS: &[u8; 16] = b"0123456789abcdef";
+            let mut encoded = String::with_capacity(bytes.len() * 2);
+            for byte in bytes {
+                encoded.push(char::from(DIGITS[usize::from(*byte >> 4)]));
+                encoded.push(char::from(DIGITS[usize::from(*byte & 0x0f)]));
+            }
+            encoded
+        };
+        let content_id = content(5);
+        let day = UtcDay::new(10);
+        let (membership, keys) = make_membership(content_id, 1);
+        let signer = signing_key(&membership, &keys, 0);
+        let mut sketch = ClientSketch::new();
+        sketch.insert(client(9));
+        let report =
+            IngestReport::new(content_id, day, 1, node(42), 1, sketch).expect("valid report");
+        let ack =
+            SignedIngestReportAck::sign(&report, &membership, signer).expect("member signs ACK");
+        assert_eq!(hex(content_id.as_bytes()), field("content_id"));
+        assert_eq!(hex(client(9).as_bytes()), field("client_id"));
+        assert_eq!(hex(&day.to_bytes()), field("utc_day"));
+        assert_eq!(hex(node(42).as_bytes()), field("node_id"));
+        assert_eq!(hex(&report.sketch().serialize()), field("report_sketch"));
+        let report_wire = format!(
+            "5049525001{}{}{}{}{}00000026{}",
+            field("content_id"),
+            field("utc_day"),
+            field("view"),
+            field("node_id"),
+            field("report_sequence"),
+            field("report_sketch")
+        );
+        assert_eq!(
+            hex(&report.canonical_bytes().expect("report encodes")),
+            report_wire
+        );
+        assert_eq!(
+            hex(&membership.generation().to_be_bytes()),
+            field("membership_generation")
+        );
+        let ack_message = format!(
+            "{}{}{}{}{}{}{}",
+            hex(b"populus/delegated-ingest-ack/v1"),
+            field("content_id"),
+            field("utc_day"),
+            field("view"),
+            field("node_id"),
+            field("report_sequence"),
+            field("membership_generation")
+        );
+        assert_eq!(hex(&ack.message()), ack_message);
+        assert_eq!(hex(&ack.signature), field("ack_signature"));
+        assert_eq!(hex(ack.signer.as_bytes()), field("signer_id"));
+        let ack_wire = format!(
+            "5049414b01{}{}{}{}{}{}{}{}",
+            field("content_id"),
+            field("utc_day"),
+            field("view"),
+            field("node_id"),
+            field("report_sequence"),
+            field("membership_generation"),
+            field("signer_id"),
+            field("ack_signature")
+        );
+        assert_eq!(hex(&ack.canonical_bytes()), ack_wire);
+        assert_eq!(
+            IngestReport::deserialize(&report.canonical_bytes().expect("report encodes")),
+            Ok(report)
+        );
+        SignedIngestReportAck::deserialize(&ack.canonical_bytes())
+            .expect("ACK vector decodes")
+            .verify(&membership)
+            .expect("ACK vector signature verifies");
     }
 }

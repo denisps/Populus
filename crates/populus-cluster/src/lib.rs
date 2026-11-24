@@ -1,7 +1,7 @@
 //! Deterministic authority selection and pure replicated-state handling.
 
-mod direct_ingest;
 mod delegated_ingest;
+mod direct_ingest;
 
 use populus_crypto::{
     AuthorityKeypair, PublicKeyAlgorithm, authority_id, validate_ed25519_public_key, verify_ed25519,
@@ -11,14 +11,14 @@ use std::collections::BTreeSet;
 
 mod ingest_assignment;
 
+pub use delegated_ingest::{
+    DelegatedIngestError, DelegatedIngestState, DelegatedReportReceiver, IngestReport,
+    SignedIngestReportAck,
+};
 pub use direct_ingest::{
     DEFAULT_CLOSE_GRACE_PERIOD_MS, DEFAULT_MAX_CLOCK_SKEW_MS, DEFAULT_MAX_DIRECT_VOTES_PER_MINUTE,
     DailyPopularityStatus, DirectIngestError, DirectIngestPolicy, DirectIngestState, DirectVote,
     DirectVoteOutcome, PersistentLike, SignedDirectVoteAck,
-};
-pub use delegated_ingest::{
-    DelegatedIngestError, DelegatedIngestState, DelegatedReportReceiver, IngestReport,
-    SignedIngestReportAck,
 };
 pub use ingest_assignment::{
     ASSIGNMENT_VERSION, AssignmentAlgorithm, AssignmentError, DelegationDescriptor,

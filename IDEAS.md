@@ -81,3 +81,9 @@
   vote acceptable to some members and finalized at others. Define how policy
   versions are agreed or safely updated before relying on uniform daily
   acknowledgements.
+- Define delegated-descriptor rollover semantics before the control loop
+  replaces assignment parameters. Reports identify content, day, view, node,
+  and sequence, while receiver snapshots currently pin candidate NodeIds but
+  not a descriptor generation. Specify how pending reports from removed or
+  reshuffled candidates are drained, accepted, or rejected across restart, and
+  test duplicate clients across the transition.

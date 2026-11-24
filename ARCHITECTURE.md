@@ -1139,6 +1139,43 @@ view2 may be rejected or quarantined according to protocol rules.
 
 The precise statistical threshold must be derived from simulation.
 
+Phase 10 reports are scoped to `(ContentId, UtcDay, view, NodeId)` and carry
+one nonzero, monotonically increasing sequence per ingest node and daily view.
+The canonical report encoding is:
+
+```text
+"PIRP" || version=1 || ContentId[36] || UtcDay[i64be] || view[u8]
+|| NodeId[32] || sequence[u64be] || sketch_length[u32be]
+|| canonical_PHLL_sketch
+```
+
+An authority accepts only the next contiguous sequence from an authenticated
+descriptor candidate. It stores the SHA-256 digest of the most recently
+accepted report: an exact retry is acknowledged without merging twice, an
+older sequence is stale, a different payload at the same sequence conflicts,
+and a sequence gap is rejected so buffered data is not silently skipped.
+Transport authentication must supply the sender `NodeId`; a claimed identity
+inside a report is not sufficient.
+
+Each acknowledgement binds the report scope, node, sequence, and current
+membership generation. Its signature preimage is
+`"populus/delegated-ingest-ack/v1" || ContentId[36] || UtcDay[i64be] ||
+view[u8] || NodeId[32] || sequence[u64be] || membership_generation[u64be]`.
+The canonical acknowledgement is `"PIAK" || version=1` followed by those
+fields, the signing `AuthorityId[32]`, and the Ed25519 signature. An ingest
+node retains an immutable pending report until every authority in the current
+four-member view has acknowledged it. Retargeting a pending report to a newer
+membership generation clears the old acknowledgement set.
+
+`PINS` and `PIAS` version-1 snapshots persist the ingest node's active and
+pending sketches, acknowledgement set, and the authority's aggregate sketch
+and per-candidate replay state, respectively. Their counted identity sets are
+strictly sorted and unique. A receiver must durably persist its merged state
+and replay metadata before transmitting its signed acknowledgement. The
+independent `testvectors/delegated-ingest-v1.txt` fixture fixes report bytes,
+acknowledgement bytes, and the signature preimage. Any incompatible wire
+change requires a version and compatibility decision.
+
 ---
 
 # 22. Byzantine scope

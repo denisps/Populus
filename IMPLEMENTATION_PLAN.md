@@ -1124,6 +1124,13 @@ malicious suppressed sketch
 one corrupted view
 ```
 
+The seeded simulator exercises the actual delegated report/ACK state with
+independent view accumulators, +/-30-second ingest clock offsets, 0-10-second
+network delay, lost report and ACK retries, duplicate delivery, sender and
+receiver snapshot restoration, and a delayed stale report. It also measures
+how inflated or suppressed sketches affect only their own view; statistical
+quarantine remains Phase 12 work.
+
 ---
 
 # 16. Phase 11: delegation control loop
