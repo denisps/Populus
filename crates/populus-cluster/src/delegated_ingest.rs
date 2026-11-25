@@ -15,6 +15,12 @@ const ACK_HEADER: [u8; 4] = *b"PIAK";
 const INGEST_STATE_HEADER: [u8; 4] = *b"PINS";
 const AUTHORITY_STATE_HEADER: [u8; 4] = *b"PIAS";
 const FORMAT_VERSION: u8 = 1;
+const REPORT_RECEIVER_FIXED_BYTES: usize = 4 + 1 + 36 + 8 + 1 + 4 + 4 + 4;
+const MAX_SERIALIZED_SKETCH_BYTES: usize = 6 + populus_sketch::REGISTER_COUNT * 6 / 8;
+const REPORT_RECEIVER_CANDIDATE_BYTES: usize = 32 + 32 + 8 + 32;
+const MAX_REPORT_RECEIVER_CANDIDATES: usize =
+    (MAX_STATE_COMPONENT_BYTES - REPORT_RECEIVER_FIXED_BYTES - MAX_SERIALIZED_SKETCH_BYTES)
+        / REPORT_RECEIVER_CANDIDATE_BYTES;
 
 /// One immutable aggregate from an ingest node for one content, day, and view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -528,6 +534,7 @@ impl DelegatedIngestState {
                 let report = IngestReport::deserialize(cursor.length_prefixed()?)?;
                 let acknowledged_authorities = read_authorities(&mut cursor)?;
                 if !acknowledged_authorities.is_subset(&expected_authorities)
+                    || acknowledged_authorities == expected_authorities
                     || report.scope() != (content_id, day, view)
                     || report.node_id != node_id
                     || report.sequence != report_sequence
@@ -573,7 +580,9 @@ impl DelegatedReportReceiver {
     ///
     /// # Errors
     ///
-    /// Returns a typed error for invalid view or content membership.
+    /// Returns a typed error for invalid view, content membership, or a
+    /// descriptor too large to fit one replay entry per candidate in a bounded
+    /// receiver snapshot.
     pub fn new(
         content_id: ContentId,
         day: UtcDay,
@@ -583,6 +592,7 @@ impl DelegatedReportReceiver {
     ) -> Result<Self, DelegatedIngestError> {
         validate_view(view)?;
         validate_membership(content_id, membership)?;
+        enforce_report_receiver_capacity(descriptor.candidates().len())?;
         Ok(Self {
             content_id,
             day,
@@ -665,6 +675,12 @@ impl DelegatedReportReceiver {
         self.sketch.estimate()
     }
 
+    /// Returns the content, daily epoch, and assignment view bound to this receiver.
+    #[must_use]
+    pub const fn scope(&self) -> (ContentId, UtcDay, u8) {
+        (self.content_id, self.day, self.view)
+    }
+
     /// Returns the highest accepted report sequence from a candidate.
     #[must_use]
     pub fn last_sequence(&self, node_id: NodeId) -> u64 {
@@ -707,8 +723,15 @@ impl DelegatedReportReceiver {
     ///
     /// # Errors
     ///
-    /// Returns a typed error for malformed state, a mismatched scope, or a
-    /// descriptor that differs from the one used before the crash.
+    /// Returns a typed error for malformed state, a mismatched content scope,
+    /// or a descriptor candidate set that differs from the one used before
+    /// the crash. The candidate-count capacity bound is enforced as well.
+    ///
+    /// Restoration compares candidate `NodeId`s only. It does not validate the
+    /// descriptor's assignment algorithm or compare the snapshot's day and
+    /// view with caller-provided expected values. Callers must compare the
+    /// restored [`Self::scope`] with the expected content/day/view and validate
+    /// the assignment algorithm separately before using the receiver.
     pub fn deserialize(
         bytes: &[u8],
         descriptor: &DelegationDescriptor,
@@ -728,6 +751,7 @@ impl DelegatedReportReceiver {
         validate_view(view)?;
         validate_membership(content_id, membership)?;
         let candidates = read_node_ids(&mut cursor)?;
+        enforce_report_receiver_capacity(candidates.len())?;
         let descriptor_candidates: BTreeSet<_> = descriptor
             .candidates()
             .iter()
@@ -875,6 +899,13 @@ fn authority_ids(membership: &MembershipView) -> BTreeSet<AuthorityId> {
 
 fn enforce_state_limit(length: usize) -> Result<(), DelegatedIngestError> {
     if length > MAX_STATE_COMPONENT_BYTES {
+        return Err(DelegatedIngestError::StateTooLarge);
+    }
+    Ok(())
+}
+
+fn enforce_report_receiver_capacity(candidate_count: usize) -> Result<(), DelegatedIngestError> {
+    if candidate_count > MAX_REPORT_RECEIVER_CANDIDATES {
         return Err(DelegatedIngestError::StateTooLarge);
     }
     Ok(())
@@ -1071,6 +1102,69 @@ mod tests {
             0,
         )
         .expect("fixture descriptor is unique and nonempty")
+    }
+
+    #[test]
+    fn receiver_candidate_count_is_bounded_by_snapshot_capacity() {
+        let content_id = content(8);
+        let (membership, keys) = make_membership(content_id, 0);
+        let nodes: Vec<_> = (0..=MAX_REPORT_RECEIVER_CANDIDATES)
+            .map(|index| {
+                let mut bytes = [0; 32];
+                bytes[28..].copy_from_slice(
+                    &u32::try_from(index)
+                        .expect("candidate fixture index fits in u32")
+                        .to_be_bytes(),
+                );
+                NodeId::from_bytes(bytes)
+            })
+            .collect();
+        let largest_descriptor = descriptor(&nodes[..MAX_REPORT_RECEIVER_CANDIDATES]);
+        let mut receiver = DelegatedReportReceiver::new(
+            content_id,
+            UtcDay::new(0),
+            0,
+            &largest_descriptor,
+            &membership,
+        )
+        .expect("largest capacity-safe descriptor is accepted");
+        let mut dense_sketch = ClientSketch::new();
+        for value in 0..=u8::MAX {
+            dense_sketch.insert(client(value));
+        }
+        let mut extra_client = [0; 32];
+        extra_client[0] = 1;
+        dense_sketch.insert(ClientId::from_bytes(extra_client));
+        let candidate = largest_descriptor.candidates()[0].node_id();
+        let report = IngestReport::new(content_id, UtcDay::new(0), 0, candidate, 1, dense_sketch)
+            .expect("dense report is valid");
+        receiver
+            .accept_report(
+                &report,
+                candidate,
+                &membership,
+                signing_key(&membership, &keys, 0),
+            )
+            .expect("candidate report is accepted");
+        assert!(
+            receiver
+                .serialize()
+                .expect("maximum receiver snapshot fits")
+                .len()
+                <= MAX_STATE_COMPONENT_BYTES
+        );
+
+        let oversized_descriptor = descriptor(&nodes);
+        assert_eq!(
+            DelegatedReportReceiver::new(
+                content_id,
+                UtcDay::new(0),
+                0,
+                &oversized_descriptor,
+                &membership,
+            ),
+            Err(DelegatedIngestError::StateTooLarge)
+        );
     }
 
     #[test]
@@ -1396,6 +1490,52 @@ mod tests {
         assert_eq!(restored, ingest);
         assert_eq!(restored.active.estimate(), 2.0);
         assert!(restored.pending_report().is_none());
+    }
+
+    #[test]
+    fn pending_snapshot_rejects_all_acknowledgements_but_restores_partial_sets() {
+        let content_id = content(15);
+        let (membership, keys) = make_membership(content_id, 1);
+        let mut ingest =
+            DelegatedIngestState::new(content_id, UtcDay::new(0), 0, node(82), &membership)
+                .expect("valid ingest state");
+        ingest.record_client(client(1));
+        let report = ingest
+            .rollover()
+            .expect("rollover succeeds")
+            .expect("nonempty sketch creates a pending report")
+            .clone();
+
+        for authority_index in 0..AUTHORITY_COUNT - 1 {
+            let ack = SignedIngestReportAck::sign(
+                &report,
+                &membership,
+                signing_key(&membership, &keys, authority_index),
+            )
+            .expect("member signs ACK");
+            ingest
+                .acknowledge(&ack, &membership)
+                .expect("partial ACK is recorded");
+            let snapshot = ingest.serialize().expect("partial snapshot fits");
+            let restored =
+                DelegatedIngestState::deserialize(&snapshot).expect("partial ACK state restores");
+            assert_eq!(
+                restored.pending_authorities().len(),
+                AUTHORITY_COUNT - authority_index - 1
+            );
+        }
+
+        let mut impossible_snapshot = ingest.serialize().expect("three-ACK snapshot fits");
+        let acknowledgements_start = impossible_snapshot.len() - 1 - (AUTHORITY_COUNT - 1) * 32;
+        impossible_snapshot.truncate(acknowledgements_start);
+        impossible_snapshot.push(u8::try_from(AUTHORITY_COUNT).expect("authority count fits u8"));
+        for authority in &ingest.expected_authorities {
+            impossible_snapshot.extend_from_slice(authority.as_bytes());
+        }
+        assert_eq!(
+            DelegatedIngestState::deserialize(&impossible_snapshot),
+            Err(DelegatedIngestError::InvalidEncoding)
+        );
     }
 
     #[test]
