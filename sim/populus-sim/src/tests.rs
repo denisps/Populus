@@ -49,27 +49,53 @@ struct DelegatedDeliveryFaults {
     lost_report_retried: bool,
     lost_ack_retried: bool,
     duplicate_report_retried: bool,
+    restarts: DelegatedRestartFaults,
 }
 
+#[derive(Default)]
+struct DelegatedRestartFaults {
+    authority_crash_retried: bool,
+    sender_crash_retried: bool,
+}
+
+struct DelegatedDeliveryContext<'a> {
+    descriptor: &'a DelegationDescriptor,
+    membership: &'a MembershipView,
+    keys: &'a [AuthorityKeypair],
+}
+
+#[allow(clippy::too_many_lines)]
 fn deliver_delegated_report(
     report: &IngestReport,
     ingest: &mut DelegatedIngestState,
     (view, node_id): (usize, NodeId),
     receivers: &mut [DelegatedReportReceiver],
-    membership: &MembershipView,
-    keys: &[AuthorityKeypair],
+    context: &DelegatedDeliveryContext<'_>,
     faults: &mut DelegatedDeliveryFaults,
 ) {
-    if view == 0 && report.sequence() == 1 && !faults.lost_report_retried {
-        // Drop the first send; the receiver call below is the sender's retry.
-        faults.lost_report_retried = true;
-    }
+    let descriptor = context.descriptor;
+    let membership = context.membership;
+    let keys = context.keys;
+    let mut lost_report_authority = None;
     for (authority_index, receiver) in receivers.iter_mut().enumerate() {
         let authority_id = membership.members()[authority_index].authority_id();
         let signer = keys
             .iter()
             .find(|key| key.authority_id() == authority_id)
             .expect("membership authority has a signing key");
+        if view == 0
+            && report.sequence() == 1
+            && authority_index == 0
+            && !faults.lost_report_retried
+        {
+            assert_eq!(ingest.pending_report(), Some(report));
+            assert!(ingest.pending_authorities().contains(&authority_id));
+            let sequence_before_delivery = receiver.last_sequence(node_id);
+            assert_eq!(sequence_before_delivery, 0);
+            assert_eq!(receiver.last_sequence(node_id), sequence_before_delivery);
+            lost_report_authority = Some(authority_index);
+            continue;
+        }
         let ack = receiver
             .accept_report(report, node_id, membership, signer)
             .expect("authenticated report is accepted or idempotently retried");
@@ -78,7 +104,59 @@ fn deliver_delegated_report(
                 .accept_report(report, node_id, membership, signer)
                 .expect("lost ACK retry is idempotently acknowledged");
             assert_eq!(retry_ack, ack);
+            assert_eq!(ingest.pending_report(), Some(report));
+            assert!(ingest.pending_authorities().contains(&authority_id));
             faults.lost_ack_retried = true;
+            ingest
+                .acknowledge(&retry_ack, membership)
+                .expect("replayed ACK applies after the original ACK is lost");
+            assert!(!ingest.pending_authorities().contains(&authority_id));
+            assert_eq!(ingest.pending_report(), Some(report));
+        } else if view == 1
+            && report.sequence() == 1
+            && authority_index == 1
+            && !faults.restarts.authority_crash_retried
+        {
+            let snapshot = receiver
+                .serialize()
+                .expect("authority snapshot persists before ACK delivery");
+            *receiver = DelegatedReportReceiver::deserialize(&snapshot, descriptor, membership)
+                .expect("authority restart restores sequence and report digest");
+            assert_eq!(receiver.last_sequence(node_id), report.sequence());
+            let retry_ack = receiver
+                .accept_report(report, node_id, membership, signer)
+                .expect("restored authority re-acknowledges the same report");
+            assert_eq!(retry_ack, ack);
+            faults.restarts.authority_crash_retried = true;
+            ingest
+                .acknowledge(&retry_ack, membership)
+                .expect("ACK from restored authority applies");
+        } else if view == 2
+            && report.sequence() == 1
+            && authority_index == 1
+            && !faults.restarts.sender_crash_retried
+        {
+            assert_eq!(ingest.pending_report(), Some(report));
+            assert!(ingest.pending_authorities().contains(&authority_id));
+            let snapshot = ingest
+                .serialize()
+                .expect("sender snapshot persists with an outstanding ACK");
+            *ingest = DelegatedIngestState::deserialize(&snapshot)
+                .expect("sender restart restores the pending report");
+            assert_eq!(ingest.pending_report(), Some(report));
+            assert!(ingest.pending_authorities().contains(&authority_id));
+            let retry_ack = receiver
+                .accept_report(report, node_id, membership, signer)
+                .expect("authority retries ACK after sender restart");
+            assert_eq!(retry_ack, ack);
+            faults.restarts.sender_crash_retried = true;
+            assert!(
+                !ingest
+                    .acknowledge(&retry_ack, membership)
+                    .expect("missing ACK applies after sender restart")
+            );
+            assert!(!ingest.pending_authorities().contains(&authority_id));
+            assert_eq!(ingest.pending_report(), Some(report));
         } else if view == 2
             && report.sequence() == 1
             && authority_index == 0
@@ -89,10 +167,38 @@ fn deliver_delegated_report(
                 .expect("duplicate report is acknowledged without a second merge");
             assert_eq!(duplicate_ack, ack);
             faults.duplicate_report_retried = true;
+            ingest
+                .acknowledge(&ack, membership)
+                .expect("signed ACK applies to the pending report");
+        } else {
+            ingest
+                .acknowledge(&ack, membership)
+                .expect("signed ACK applies to the pending report");
         }
-        ingest
-            .acknowledge(&ack, membership)
-            .expect("signed ACK applies to the pending report");
+    }
+
+    if let Some(authority_index) = lost_report_authority {
+        let authority_id = membership.members()[authority_index].authority_id();
+        let receiver = &mut receivers[authority_index];
+        assert_eq!(receiver.last_sequence(node_id), 0);
+        assert_eq!(ingest.pending_report(), Some(report));
+        assert!(ingest.pending_authorities().contains(&authority_id));
+        let signer = keys
+            .iter()
+            .find(|key| key.authority_id() == authority_id)
+            .expect("membership authority has a signing key");
+        let retry_ack = receiver
+            .accept_report(report, node_id, membership, signer)
+            .expect("lost report is accepted when the pending report is retried");
+        assert_eq!(receiver.last_sequence(node_id), report.sequence());
+        assert!(
+            ingest
+                .acknowledge(&retry_ack, membership)
+                .expect("retried report ACK completes delivery")
+        );
+        assert!(!ingest.pending_authorities().contains(&authority_id));
+        assert!(ingest.pending_report().is_none());
+        faults.lost_report_retried = true;
     }
 }
 
@@ -484,6 +590,11 @@ fn delegated_reports_survive_seeded_timing_loss_retry_restart_and_reordering() {
         })
         .collect();
     let mut delivery_faults = DelegatedDeliveryFaults::default();
+    let delivery_context = DelegatedDeliveryContext {
+        descriptor: &descriptor,
+        membership: &membership,
+        keys: &keys,
+    };
     for view in 0..VIEW_COUNT {
         for node_index in 0..candidate_ids.len() {
             let node_arrivals = &mut arrivals[view][node_index];
@@ -510,8 +621,7 @@ fn delegated_reports_survive_seeded_timing_loss_retry_restart_and_reordering() {
                         &mut ingest[view][node_index],
                         (view, candidate_ids[node_index]),
                         &mut receivers[view],
-                        &membership,
-                        &keys,
+                        &delivery_context,
                         &mut delivery_faults,
                     );
                     expected_sketch = ClientSketch::new();
@@ -535,8 +645,7 @@ fn delegated_reports_survive_seeded_timing_loss_retry_restart_and_reordering() {
                     &mut ingest[view][node_index],
                     (view, candidate_ids[node_index]),
                     &mut receivers[view],
-                    &membership,
-                    &keys,
+                    &delivery_context,
                     &mut delivery_faults,
                 );
             }
@@ -581,6 +690,8 @@ fn delegated_reports_survive_seeded_timing_loss_retry_restart_and_reordering() {
     assert!(delivery_faults.lost_report_retried);
     assert!(delivery_faults.lost_ack_retried);
     assert!(delivery_faults.duplicate_report_retried);
+    assert!(delivery_faults.restarts.authority_crash_retried);
+    assert!(delivery_faults.restarts.sender_crash_retried);
 
     for view_states in &mut ingest {
         for state in view_states {
@@ -632,8 +743,7 @@ fn delegated_reports_survive_seeded_timing_loss_retry_restart_and_reordering() {
             &mut ingest[view][node_index],
             (view, candidate_ids[node_index]),
             &mut receivers[view],
-            &membership,
-            &keys,
+            &delivery_context,
             &mut delivery_faults,
         );
         for (authority_index, receiver) in receivers[view].iter_mut().enumerate() {

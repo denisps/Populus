@@ -1136,8 +1136,15 @@ mod tests {
         extra_client[0] = 1;
         dense_sketch.insert(ClientId::from_bytes(extra_client));
         let candidate = largest_descriptor.candidates()[0].node_id();
-        let report = IngestReport::new(content_id, UtcDay::new(0), 0, candidate, 1, dense_sketch)
-            .expect("dense report is valid");
+        let report = IngestReport::new(
+            content_id,
+            UtcDay::new(0),
+            0,
+            candidate,
+            1,
+            dense_sketch.clone(),
+        )
+        .expect("dense report is valid");
         receiver
             .accept_report(
                 &report,
@@ -1146,13 +1153,39 @@ mod tests {
                 signing_key(&membership, &keys, 0),
             )
             .expect("candidate report is accepted");
-        assert!(
+        for replay_candidate in receiver.candidates.iter().copied() {
+            let replay_report = if replay_candidate == candidate {
+                report.clone()
+            } else {
+                IngestReport::new(
+                    content_id,
+                    UtcDay::new(0),
+                    0,
+                    replay_candidate,
+                    1,
+                    ClientSketch::new(),
+                )
+                .expect("candidate replay report is valid")
+            };
+            let digest: [u8; 32] = Sha256::digest(
+                replay_report
+                    .canonical_bytes()
+                    .expect("candidate replay report is bounded"),
+            )
+            .into();
+            receiver.last_sequences.insert(replay_candidate, 1);
             receiver
-                .serialize()
-                .expect("maximum receiver snapshot fits")
-                .len()
-                <= MAX_STATE_COMPONENT_BYTES
-        );
+                .last_report_digests
+                .insert(replay_candidate, digest);
+        }
+        let snapshot = receiver
+            .serialize()
+            .expect("maximum receiver snapshot with every replay entry fits");
+        assert!(snapshot.len() <= MAX_STATE_COMPONENT_BYTES);
+        let restored =
+            DelegatedReportReceiver::deserialize(&snapshot, &largest_descriptor, &membership)
+                .expect("fully populated maximum receiver snapshot restores");
+        assert_eq!(restored, receiver);
 
         let oversized_descriptor = descriptor(&nodes);
         assert_eq!(
