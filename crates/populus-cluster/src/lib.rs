@@ -1,5 +1,6 @@
 //! Deterministic authority selection and pure replicated-state handling.
 
+mod delegated_ingest;
 mod direct_ingest;
 
 use populus_crypto::{
@@ -10,6 +11,10 @@ use std::collections::BTreeSet;
 
 mod ingest_assignment;
 
+pub use delegated_ingest::{
+    DelegatedIngestError, DelegatedIngestState, DelegatedReportReceiver, IngestReport,
+    SignedIngestReportAck,
+};
 pub use direct_ingest::{
     DEFAULT_CLOSE_GRACE_PERIOD_MS, DEFAULT_MAX_CLOCK_SKEW_MS, DEFAULT_MAX_DIRECT_VOTES_PER_MINUTE,
     DailyPopularityStatus, DirectIngestError, DirectIngestPolicy, DirectIngestState, DirectVote,

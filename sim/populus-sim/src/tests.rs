@@ -6,8 +6,14 @@ use super::{
     PartitionAction, PartitionEvent, SIMULATED_PAYLOAD_BYTES, SimulationConfig, SimulationError,
     VIEW_COUNT, run_simulation,
 };
-use populus_cluster::{AssignmentAlgorithm, DelegationDescriptor, IngestNode};
-use populus_types::{ClientId, NodeId};
+use populus_cluster::{
+    AUTHORITY_COUNT, AssignmentAlgorithm, AuthorityMember, DelegatedIngestState,
+    DelegatedReportReceiver, DelegationDescriptor, IngestNode, IngestReport, MembershipView,
+    select_authorities,
+};
+use populus_crypto::{AuthorityKeypair, RoutingIdentifier, routing_key};
+use populus_sketch::ClientSketch;
+use populus_types::{ClientId, ContentId, NodeId, UtcDay};
 
 fn assignment_descriptors(node_ids: &[NodeId]) -> Vec<DelegationDescriptor> {
     vec![
@@ -35,6 +41,164 @@ fn small_config() -> SimulationConfig {
             max_ms: 70_000,
         },
         ..SimulationConfig::default()
+    }
+}
+
+#[derive(Default)]
+struct DelegatedDeliveryFaults {
+    lost_report_retried: bool,
+    lost_ack_retried: bool,
+    duplicate_report_retried: bool,
+    restarts: DelegatedRestartFaults,
+}
+
+#[derive(Default)]
+struct DelegatedRestartFaults {
+    authority_crash_retried: bool,
+    sender_crash_retried: bool,
+}
+
+struct DelegatedDeliveryContext<'a> {
+    descriptor: &'a DelegationDescriptor,
+    membership: &'a MembershipView,
+    keys: &'a [AuthorityKeypair],
+}
+
+#[allow(clippy::too_many_lines)]
+fn deliver_delegated_report(
+    report: &IngestReport,
+    ingest: &mut DelegatedIngestState,
+    (view, node_id): (usize, NodeId),
+    receivers: &mut [DelegatedReportReceiver],
+    context: &DelegatedDeliveryContext<'_>,
+    faults: &mut DelegatedDeliveryFaults,
+) {
+    let descriptor = context.descriptor;
+    let membership = context.membership;
+    let keys = context.keys;
+    let mut lost_report_authority = None;
+    for (authority_index, receiver) in receivers.iter_mut().enumerate() {
+        let authority_id = membership.members()[authority_index].authority_id();
+        let signer = keys
+            .iter()
+            .find(|key| key.authority_id() == authority_id)
+            .expect("membership authority has a signing key");
+        if view == 0
+            && report.sequence() == 1
+            && authority_index == 0
+            && !faults.lost_report_retried
+        {
+            assert_eq!(ingest.pending_report(), Some(report));
+            assert!(ingest.pending_authorities().contains(&authority_id));
+            let sequence_before_delivery = receiver.last_sequence(node_id);
+            assert_eq!(sequence_before_delivery, 0);
+            assert_eq!(receiver.last_sequence(node_id), sequence_before_delivery);
+            lost_report_authority = Some(authority_index);
+            continue;
+        }
+        let ack = receiver
+            .accept_report(report, node_id, membership, signer)
+            .expect("authenticated report is accepted or idempotently retried");
+        if view == 1 && report.sequence() == 1 && authority_index == 0 && !faults.lost_ack_retried {
+            let retry_ack = receiver
+                .accept_report(report, node_id, membership, signer)
+                .expect("lost ACK retry is idempotently acknowledged");
+            assert_eq!(retry_ack, ack);
+            assert_eq!(ingest.pending_report(), Some(report));
+            assert!(ingest.pending_authorities().contains(&authority_id));
+            faults.lost_ack_retried = true;
+            ingest
+                .acknowledge(&retry_ack, membership)
+                .expect("replayed ACK applies after the original ACK is lost");
+            assert!(!ingest.pending_authorities().contains(&authority_id));
+            assert_eq!(ingest.pending_report(), Some(report));
+        } else if view == 1
+            && report.sequence() == 1
+            && authority_index == 1
+            && !faults.restarts.authority_crash_retried
+        {
+            let snapshot = receiver
+                .serialize()
+                .expect("authority snapshot persists before ACK delivery");
+            *receiver = DelegatedReportReceiver::deserialize(&snapshot, descriptor, membership)
+                .expect("authority restart restores sequence and report digest");
+            assert_eq!(receiver.last_sequence(node_id), report.sequence());
+            let retry_ack = receiver
+                .accept_report(report, node_id, membership, signer)
+                .expect("restored authority re-acknowledges the same report");
+            assert_eq!(retry_ack, ack);
+            faults.restarts.authority_crash_retried = true;
+            ingest
+                .acknowledge(&retry_ack, membership)
+                .expect("ACK from restored authority applies");
+        } else if view == 2
+            && report.sequence() == 1
+            && authority_index == 1
+            && !faults.restarts.sender_crash_retried
+        {
+            assert_eq!(ingest.pending_report(), Some(report));
+            assert!(ingest.pending_authorities().contains(&authority_id));
+            let snapshot = ingest
+                .serialize()
+                .expect("sender snapshot persists with an outstanding ACK");
+            *ingest = DelegatedIngestState::deserialize(&snapshot)
+                .expect("sender restart restores the pending report");
+            assert_eq!(ingest.pending_report(), Some(report));
+            assert!(ingest.pending_authorities().contains(&authority_id));
+            let retry_ack = receiver
+                .accept_report(report, node_id, membership, signer)
+                .expect("authority retries ACK after sender restart");
+            assert_eq!(retry_ack, ack);
+            faults.restarts.sender_crash_retried = true;
+            assert!(
+                !ingest
+                    .acknowledge(&retry_ack, membership)
+                    .expect("missing ACK applies after sender restart")
+            );
+            assert!(!ingest.pending_authorities().contains(&authority_id));
+            assert_eq!(ingest.pending_report(), Some(report));
+        } else if view == 2
+            && report.sequence() == 1
+            && authority_index == 0
+            && !faults.duplicate_report_retried
+        {
+            let duplicate_ack = receiver
+                .accept_report(report, node_id, membership, signer)
+                .expect("duplicate report is acknowledged without a second merge");
+            assert_eq!(duplicate_ack, ack);
+            faults.duplicate_report_retried = true;
+            ingest
+                .acknowledge(&ack, membership)
+                .expect("signed ACK applies to the pending report");
+        } else {
+            ingest
+                .acknowledge(&ack, membership)
+                .expect("signed ACK applies to the pending report");
+        }
+    }
+
+    if let Some(authority_index) = lost_report_authority {
+        let authority_id = membership.members()[authority_index].authority_id();
+        let receiver = &mut receivers[authority_index];
+        assert_eq!(receiver.last_sequence(node_id), 0);
+        assert_eq!(ingest.pending_report(), Some(report));
+        assert!(ingest.pending_authorities().contains(&authority_id));
+        let signer = keys
+            .iter()
+            .find(|key| key.authority_id() == authority_id)
+            .expect("membership authority has a signing key");
+        let retry_ack = receiver
+            .accept_report(report, node_id, membership, signer)
+            .expect("lost report is accepted when the pending report is retried");
+        assert_eq!(receiver.last_sequence(node_id), report.sequence());
+        assert!(
+            ingest
+                .acknowledge(&retry_ack, membership)
+                .expect("retried report ACK completes delivery")
+        );
+        assert!(!ingest.pending_authorities().contains(&authority_id));
+        assert!(ingest.pending_report().is_none());
+        faults.lost_report_retried = true;
     }
 }
 
@@ -325,6 +489,391 @@ fn clock_skew_splits_local_windows_without_losing_the_merged_population()
         assert_eq!(summary.distinct_client_estimate, 120.0);
     }
     Ok(())
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn delegated_reports_survive_seeded_timing_loss_retry_restart_and_reordering() {
+    let content_id = ContentId::from_digest([0x33; 32]);
+    let day = UtcDay::new(10);
+    let keys: Vec<_> = (1..=4)
+        .map(|value| AuthorityKeypair::from_secret_key([value; 32]))
+        .collect();
+    let members: Vec<_> = keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            AuthorityMember::new(
+                NodeId::from_bytes(
+                    [u8::try_from(index + 1).expect("four fixture members fit in u8"); 32],
+                ),
+                key.public_key(),
+            )
+            .expect("generated authority member is valid")
+        })
+        .collect();
+    let routing_key = routing_key(RoutingIdentifier::Content(&content_id));
+    let membership = MembershipView::new(
+        routing_key,
+        1,
+        select_authorities(&routing_key, &members).expect("fixture members are unique"),
+    )
+    .expect("fixture membership is canonical");
+    let candidate_ids = [
+        NodeId::from_bytes([0x40; 32]),
+        NodeId::from_bytes([0x41; 32]),
+        NodeId::from_bytes([0x42; 32]),
+    ];
+    let descriptor = DelegationDescriptor::new(
+        AssignmentAlgorithm::XorNearest,
+        candidate_ids.iter().copied().map(IngestNode::new).collect(),
+        0,
+    )
+    .expect("three candidates form a valid descriptor");
+    let mut ingest: Vec<Vec<_>> = (0..VIEW_COUNT)
+        .map(|view| {
+            candidate_ids
+                .iter()
+                .map(|node_id| {
+                    DelegatedIngestState::new(
+                        content_id,
+                        day,
+                        u8::try_from(view).expect("three views fit in u8"),
+                        *node_id,
+                        &membership,
+                    )
+                    .expect("valid delegated-ingest state")
+                })
+                .collect()
+        })
+        .collect();
+    let mut random = super::rng::SeededRandom::new(0x10_10_10);
+    let latency = LatencyDistribution::Uniform {
+        min_ms: 0,
+        max_ms: 10_000,
+    };
+    let clock_offsets = [-30_000_i64, 0, 30_000];
+    let mut arrivals = vec![vec![Vec::new(); candidate_ids.len()]; VIEW_COUNT];
+    for client_index in 0..60_u8 {
+        let client_id = ClientId::from_bytes([client_index + 1; 32]);
+        let destinations = descriptor
+            .assign_views(client_id)
+            .expect("descriptor assigns each client in all views");
+        for (view, destination) in destinations.into_iter().enumerate() {
+            let node_index = candidate_ids
+                .iter()
+                .position(|node_id| *node_id == destination.node_id())
+                .expect("assigned node belongs to the descriptor");
+            let network_delay = latency.sample(&mut random);
+            let local_time = 59_000_i64
+                + i64::try_from(network_delay).expect("configured delay fits in i64")
+                + clock_offsets[node_index];
+            arrivals[view][node_index].push((local_time, client_id));
+        }
+    }
+
+    let mut reports_by_node = vec![vec![Vec::new(); candidate_ids.len()]; VIEW_COUNT];
+    let mut receivers: Vec<Vec<_>> = (0..VIEW_COUNT)
+        .map(|view| {
+            (0..AUTHORITY_COUNT)
+                .map(|_| {
+                    DelegatedReportReceiver::new(
+                        content_id,
+                        day,
+                        u8::try_from(view).expect("three views fit in u8"),
+                        &descriptor,
+                        &membership,
+                    )
+                    .expect("valid authority receiver")
+                })
+                .collect()
+        })
+        .collect();
+    let mut delivery_faults = DelegatedDeliveryFaults::default();
+    let delivery_context = DelegatedDeliveryContext {
+        descriptor: &descriptor,
+        membership: &membership,
+        keys: &keys,
+    };
+    for view in 0..VIEW_COUNT {
+        for node_index in 0..candidate_ids.len() {
+            let node_arrivals = &mut arrivals[view][node_index];
+            if node_arrivals.is_empty() {
+                continue;
+            }
+            node_arrivals.sort_by_key(|(local_time, _)| *local_time);
+            let mut active_window = None;
+            let mut expected_sketch = ClientSketch::new();
+            for (local_time, client_id) in node_arrivals {
+                let window = local_time.div_euclid(60_000);
+                if active_window.is_some_and(|active| active != window) {
+                    let report = ingest[view][node_index]
+                        .rollover()
+                        .expect("rollover succeeds")
+                        .expect("previous report window has clients")
+                        .clone();
+                    assert_eq!(report.sketch(), &expected_sketch);
+                    reports_by_node[view][node_index].push(report);
+                    deliver_delegated_report(
+                        reports_by_node[view][node_index]
+                            .last()
+                            .expect("report was recorded"),
+                        &mut ingest[view][node_index],
+                        (view, candidate_ids[node_index]),
+                        &mut receivers[view],
+                        &delivery_context,
+                        &mut delivery_faults,
+                    );
+                    expected_sketch = ClientSketch::new();
+                }
+                active_window = Some(window);
+                ingest[view][node_index].record_client(*client_id);
+                expected_sketch.insert(*client_id);
+            }
+            if expected_sketch.estimate() > 0.0 {
+                let report = ingest[view][node_index]
+                    .rollover()
+                    .expect("final window rollover succeeds")
+                    .expect("candidate received clients in its final window")
+                    .clone();
+                assert_eq!(report.sketch(), &expected_sketch);
+                reports_by_node[view][node_index].push(report);
+                deliver_delegated_report(
+                    reports_by_node[view][node_index]
+                        .last()
+                        .expect("report was recorded"),
+                    &mut ingest[view][node_index],
+                    (view, candidate_ids[node_index]),
+                    &mut receivers[view],
+                    &delivery_context,
+                    &mut delivery_faults,
+                );
+            }
+        }
+    }
+    assert!(
+        reports_by_node
+            .iter()
+            .flatten()
+            .any(|reports| reports.len() > 1),
+        "clock skew and latency roll at least one ingest node into a later window"
+    );
+    let (split_view, split_node) = reports_by_node
+        .iter()
+        .enumerate()
+        .find_map(|(view, view_reports)| {
+            view_reports
+                .iter()
+                .position(|reports| reports.len() > 1)
+                .map(|node_index| (view, node_index))
+        })
+        .expect("at least one candidate emitted multiple report windows");
+    let first_window = arrivals[split_view][split_node][0].0.div_euclid(60_000);
+    let second_window = arrivals[split_view][split_node]
+        .iter()
+        .find(|(local_time, _)| local_time.div_euclid(60_000) > first_window)
+        .expect("node has an arrival after its first report boundary")
+        .0
+        .div_euclid(60_000);
+    let mut later_window_clients = ClientSketch::new();
+    for (local_time, client_id) in &arrivals[split_view][split_node] {
+        if local_time.div_euclid(60_000) == second_window {
+            later_window_clients.insert(*client_id);
+        }
+    }
+    assert!(later_window_clients.estimate() > 0.0);
+    assert_eq!(
+        reports_by_node[split_view][split_node][1].sketch(),
+        &later_window_clients,
+        "boundary-delayed clients appear in the later report"
+    );
+    assert!(delivery_faults.lost_report_retried);
+    assert!(delivery_faults.lost_ack_retried);
+    assert!(delivery_faults.duplicate_report_retried);
+    assert!(delivery_faults.restarts.authority_crash_retried);
+    assert!(delivery_faults.restarts.sender_crash_retried);
+
+    for view_states in &mut ingest {
+        for state in view_states {
+            let snapshot = state
+                .serialize()
+                .expect("pending report snapshot is bounded");
+            *state = DelegatedIngestState::deserialize(&snapshot).expect("sender restart restores");
+        }
+    }
+    assert!(
+        ingest
+            .iter()
+            .flatten()
+            .all(|state| state.pending_report().is_none())
+    );
+
+    for view_receivers in &mut receivers {
+        *view_receivers = view_receivers
+            .iter()
+            .map(|receiver| {
+                let snapshot = receiver.serialize().expect("authority snapshot is bounded");
+                DelegatedReportReceiver::deserialize(&snapshot, &descriptor, &membership)
+                    .expect("authority restart restores replay state")
+            })
+            .collect();
+    }
+
+    let second_client = ClientId::from_bytes([0xFE; 32]);
+    for (view, destination) in descriptor
+        .assign_views(second_client)
+        .expect("second client has three destinations")
+        .into_iter()
+        .enumerate()
+    {
+        let node_index = candidate_ids
+            .iter()
+            .position(|node_id| *node_id == destination.node_id())
+            .expect("assigned node belongs to the descriptor");
+        ingest[view][node_index].record_client(second_client);
+        let second_report = ingest[view][node_index]
+            .rollover()
+            .expect("second rollover succeeds")
+            .expect("second client is buffered")
+            .clone();
+        let first_report = reports_by_node[view][node_index].first().cloned();
+        reports_by_node[view][node_index].push(second_report.clone());
+        deliver_delegated_report(
+            &second_report,
+            &mut ingest[view][node_index],
+            (view, candidate_ids[node_index]),
+            &mut receivers[view],
+            &delivery_context,
+            &mut delivery_faults,
+        );
+        for (authority_index, receiver) in receivers[view].iter_mut().enumerate() {
+            let authority_id = membership.members()[authority_index].authority_id();
+            let signer = keys
+                .iter()
+                .find(|key| key.authority_id() == authority_id)
+                .expect("membership authority has a signing key");
+            if let Some(first_report) = &first_report {
+                assert_eq!(
+                    receiver.accept_report(
+                        first_report,
+                        candidate_ids[node_index],
+                        &membership,
+                        signer,
+                    ),
+                    Err(populus_cluster::DelegatedIngestError::StaleReport),
+                    "a delayed prior sequence cannot be merged after the next report"
+                );
+            }
+        }
+    }
+    assert!(
+        ingest
+            .iter()
+            .flatten()
+            .all(|state| state.pending_report().is_none())
+    );
+    for (view, authority_receivers) in receivers.iter().enumerate() {
+        assert!(
+            authority_receivers
+                .iter()
+                .all(|receiver| (receiver.estimate() - 61.0).abs() < f64::EPSILON),
+            "view {view} converges despite timing and delivery faults"
+        );
+    }
+}
+
+#[test]
+fn delegated_view_reports_keep_inflated_and_suppressed_sketches_isolated() {
+    let content_id = ContentId::from_digest([0x34; 32]);
+    let day = UtcDay::new(10);
+    let keys: Vec<_> = (1..=4)
+        .map(|value| AuthorityKeypair::from_secret_key([value; 32]))
+        .collect();
+    let members: Vec<_> = keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            AuthorityMember::new(
+                NodeId::from_bytes(
+                    [u8::try_from(index + 1).expect("four fixture members fit in u8"); 32],
+                ),
+                key.public_key(),
+            )
+            .expect("generated authority member is valid")
+        })
+        .collect();
+    let routing_key = routing_key(RoutingIdentifier::Content(&content_id));
+    let membership = MembershipView::new(
+        routing_key,
+        1,
+        select_authorities(&routing_key, &members).expect("fixture members are unique"),
+    )
+    .expect("fixture membership is canonical");
+    let candidate_ids = [
+        NodeId::from_bytes([0x50; 32]),
+        NodeId::from_bytes([0x51; 32]),
+        NodeId::from_bytes([0x52; 32]),
+    ];
+    let descriptor = DelegationDescriptor::new(
+        AssignmentAlgorithm::XorNearest,
+        candidate_ids.iter().copied().map(IngestNode::new).collect(),
+        0,
+    )
+    .expect("three candidates form a valid descriptor");
+    let signer_id = membership.members()[0].authority_id();
+    let signer = keys
+        .iter()
+        .find(|key| key.authority_id() == signer_id)
+        .expect("membership authority has a signing key");
+
+    for (malicious_view, add_inflated_clients) in [(0, false), (2, true)] {
+        let mut receivers: Vec<_> = (0..VIEW_COUNT)
+            .map(|view| {
+                DelegatedReportReceiver::new(
+                    content_id,
+                    day,
+                    u8::try_from(view).expect("three views fit in u8"),
+                    &descriptor,
+                    &membership,
+                )
+                .expect("valid authority receiver")
+            })
+            .collect();
+        for (view, receiver) in receivers.iter_mut().enumerate() {
+            let mut sketch = ClientSketch::new();
+            if view != malicious_view || add_inflated_clients {
+                for client_index in 0..20_u8 {
+                    sketch.insert(ClientId::from_bytes([client_index + 1; 32]));
+                }
+            }
+            if view == malicious_view && add_inflated_clients {
+                for client_index in 20..120_u8 {
+                    sketch.insert(ClientId::from_bytes([client_index + 1; 32]));
+                }
+            }
+            let report = IngestReport::new(
+                content_id,
+                day,
+                u8::try_from(view).expect("three views fit in u8"),
+                candidate_ids[0],
+                1,
+                sketch,
+            )
+            .expect("valid report");
+            receiver
+                .accept_report(&report, candidate_ids[0], &membership, signer)
+                .expect("descriptor candidate report is accepted");
+        }
+        let estimates: Vec<_> = receivers
+            .iter()
+            .map(DelegatedReportReceiver::estimate)
+            .collect();
+        if add_inflated_clients {
+            assert_eq!(estimates, [20.0, 20.0, 120.0]);
+        } else {
+            assert_eq!(estimates, [0.0, 20.0, 20.0]);
+        }
+    }
 }
 
 #[test]
