@@ -1235,8 +1235,9 @@ best-effort and test it under partitions, reordered evidence, churn, and
 recovery.
 
 Candidate storage remains bounded and deterministically sharded. Resource
-limits are local policy, not a network-wide candidate limit. Keep the existing
-4,096-record cap as a provisional local bound; defer dynamic scaling until
+limits are local policy, not a network-wide candidate limit. The current
+4,096-record cap is a provisional per-process registry bound, not a permanent
+limit on the network's candidate population. Defer dynamic scaling until
 simulator workloads justify it. Restart recovery preserves the process
 identity and necessary local state, then revalidates reachability and
 ownership against current observations. It does not replay a certificate
@@ -1419,24 +1420,25 @@ quality gate that was not run.
 
 | Criterion | Status | Evidence / remaining work |
 | --- | --- | --- |
-| 1. Stable process identity and durable restart recovery | Partially implemented | Transport identity creation is atomic and durable; candidate state, leases, and restart revalidation are not persisted. |
-| 2. Permissionless startup without genesis authorization | Fully implemented | Genesis manifests, signing keys, CLI options, and committee-chain runtime APIs have been removed. A node can start without bootstrap peers. |
-| 3. Network ID is fixed/configured and binds messages and state | Partially implemented | The CLI configures one network ID, defaults to the fixed public ID, and the application envelope rejects mismatches. Candidate registrations carry the network ID; durable network-scoped state is not implemented. |
-| 4. Bootstrap discovery, retries, and neighborhood merging | Partially implemented | Discovery retries alternate advertised addresses. Provisional routing and authority-state reconciliation after a merge remain. |
-| 5. Continuous multi-address identity discovery | Partially implemented | Periodic observations, endpoint attribution, and peer rotation exist; automatic local identity change handling remains incomplete. |
-| 6. Provisional participation without false verification claims | Partially implemented | Candidate contacts can support discovery, but a separate provisional routing view and full promotion workflow are absent. |
-| 7. Distinct verified NodeId evidence and direct reachability | Partially implemented | Local evidence counts distinct NodeIds and uses direct endpoint observations; distributed signed verifier exchange is not implemented. |
-| 8. Bounded sharded candidate registry without a global cap | Partially implemented | Signed registrations, deterministic shards, bounded pages, and local limits exist; sequence recovery and distributed persistence are incomplete. |
-| 9. Renewable leases and incumbent/standby behavior | Deferred | The runtime has no renewable ownership leases or standby history to preserve an incumbent. |
-| 10. Conflict detection and eventual state reconciliation | Deferred | Candidate-registration conflicts can be rejected locally, but distributed ownership evidence and authority-state reconciliation are absent. |
-| 11. Safe identity retirement and authority cleanup | Partially implemented | Retirement prevents new advertisements and authority work for its specific owner, and cleanup preserves sibling-owned state; complete handoff and persisted authority recovery remain. |
-| 12. Actual authority and ingest state-machine integration | Partially implemented | Direct and delegated adapters use existing state machines, exact endpoint attribution, and acceptance-based acknowledgements; membership and recovery remain caller-managed. |
-| 13. Regression coverage and full quality gates | Partially implemented | Focused tests cover local protocol and lifecycle behavior; permissionless simulations and final workspace gates remain. |
+| 1. Stable process identity and durable restart recovery | Partially implemented | The transport identity is created atomically and durably. Candidate sequence state, ownership leases, and restart revalidation are not persisted. |
+| 2. Permissionless startup without genesis authorization | Fully implemented | A process can start without bootstrap peers or trusted authorization. Genesis manifests, trusted signing keys, CLI options, and committee-chain runtime APIs are absent. Peer discovery and convergence have separate criteria below. |
+| 3. Network ID is fixed/configured and binds messages and state | Partially implemented | The CLI defaults to the fixed public ID, and the application envelope and candidate-registration messages are network-scoped. Durable network-scoped candidate and ownership state is not implemented. |
+| 4. Bootstrap discovery, retries, and neighborhood merging | Partially implemented | Discovery retries alternate advertised addresses. Separate provisional routing and ownership or authority-state reconciliation after groups meet are not implemented. |
+| 5. Continuous multi-address identity discovery | Partially implemented | Periodic observations, exact endpoint attribution, and observer rotation exist. Automatic discovery, activation, and revalidation of every local address change remain incomplete. |
+| 6. Provisional participation without false verification claims | Partially implemented | Provisional contacts can assist discovery but are not treated as verified routing or authority members. A separate provisional routing view and complete promotion workflow are absent. |
+| 7. Distinct verified NodeId evidence and direct reachability | Partially implemented | Local lifecycle logic counts distinct verified NodeIDs and accepts direct-reachability results. Network-bound signed evidence exchange and end-to-end verifier challenge handling are not implemented. |
+| 8. Bounded sharded candidate registry without a global cap | Partially implemented | Signed registrations, deterministic shards, bounded pages, and local capacity limits exist. The 4,096-record cap is local, not network-wide. Sequence watermarks are retained through accepted-record expiry, but are not persisted across restart or replicated. |
+| 9. Renewable leases and incumbent/standby behavior | Deferred | Runtime ownership has no renewable leases or verified renewal history for standby ranking and incumbent retention. Lease constants remain provisional. |
+| 10. Conflict detection and eventual state reconciliation | Deferred | Local registration conflicts can be rejected, but distributed ownership evidence is not exchanged and ownership or authority-state conflicts are not reconciled. |
+| 11. Safe identity retirement and authority cleanup | Partially implemented | Retirement stops new advertisements and ingest work for the retiring owner; cleanup preserves sibling-owned state. Complete handoff and persisted authority recovery remain. |
+| 12. Actual authority and ingest state-machine integration | Partially implemented | Direct and delegated adapters use the existing state machines, exact endpoint attribution, and acceptance-based acknowledgements. Membership installation, fan-out, retry, and recovery remain caller-managed. |
+| 13. Regression coverage and quality gates | Partially implemented | Focused regression tests and the `cargo xtask gate pr` workspace gate passed at commit `53d7615`, including workspace tests, strict Clippy, documentation tests, coverage, and 30 deterministic simulation tests. The required partition/merge, ownership-conflict, restart-revalidation, and disputed-authority simulations are not yet implemented. |
 
-Phase 11.5 is incomplete. The previous trusted-genesis committee model is not a
-valid compatibility layer for the permissionless protocol and must be removed.
-No claim of global ownership uniqueness, global membership consistency, or
-partition-time availability is part of the acceptance criteria.
+Phase 11.5 is incomplete. The pre-release trusted-genesis committee design has
+been removed; it is not part of the permissionless protocol or a compatibility
+requirement. No claim of global ownership uniqueness, global membership
+consistency, or partition-time availability is part of the acceptance
+criteria.
 
 # 17. Phase 12: outlier and Byzantine-report handling
 
@@ -1565,8 +1567,10 @@ anonymous content remains valid
 Provide durable, bounded, and recoverable storage for Populus state
 that must survive process restarts, crashes, and network interruptions.
 
-Phase 11.5 introduces the minimum persistence needed for a runnable
-node, particularly its cryptographic PeerId and bootstrap contacts.
+Phase 11.5 requires durable persistence of the process's cryptographic
+identity. Durable bootstrap-contact caching remains future work; configured
+bootstrap addresses are local configuration, and discovered contacts are
+currently kept in bounded memory.
 
 Phase 15 formalizes storage durability, recovery semantics, integrity,
 migration, and resource management across all implemented subsystems.
