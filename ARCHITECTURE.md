@@ -1043,11 +1043,17 @@ period. A two-times-target overload bypasses dwell for scale-up only.
 
 The initial candidate target is `ceil(3 * observed_rate / per_node_target)`,
 rounded up to a power of two and capped by the available candidate population.
-The current experimental selector is preserved; MatchBits width is recalculated
-when that selector is active. Reporting intervals are quantized to 5, 15, or
-60 seconds, with shorter intervals at higher load. These are tunable controller
-defaults, not frozen wire constants. The controller does not define descriptor
-rollover or replace Phase 12's statistical report validation.
+In direct mode, absent per-node reports are estimated from offered rate without
+the three-view multiplier; delegated mode retains the three-view per-node
+estimate. Candidate contraction uses its own sustained counter for per-node
+utilization below 70%, separate from the five fresh offered-rate samples below
+half target required to return to direct mode. Missing reports do not advance
+either counter, and hard overload cannot trigger scale-down. The current
+experimental selector is preserved; MatchBits width is recalculated when that
+selector is active. Reporting intervals are quantized to 5, 15, or 60 seconds,
+with shorter intervals at higher load. These are tunable controller defaults,
+not frozen wire constants. The controller does not define descriptor rollover
+or replace Phase 12's statistical report validation.
 
 ---
 

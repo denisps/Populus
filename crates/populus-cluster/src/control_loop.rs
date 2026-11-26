@@ -241,6 +241,7 @@ pub struct DelegationController {
     last_sample_ms: Option<u64>,
     rate_history: VecDeque<u64>,
     low_load_samples: usize,
+    low_utilization_samples: usize,
 }
 
 impl DelegationController {
@@ -258,6 +259,7 @@ impl DelegationController {
             last_sample_ms: None,
             rate_history: VecDeque::with_capacity(RATE_HISTORY_LEN),
             low_load_samples: 0,
+            low_utilization_samples: 0,
         }
     }
 
@@ -298,18 +300,22 @@ impl DelegationController {
         }
         let smoothed_rate = average(&self.rate_history);
         let observed_per_node_rate = robust_rate(sample.per_node_rates_per_minute);
+        let has_valid_utilization_sample =
+            observed_rate.is_some() || observed_per_node_rate.is_some();
         let estimated_per_node_rate = observed_per_node_rate.or_else(|| {
             smoothed_rate.map(|rate| {
-                let candidate_count = self.parameters.candidate_count.max(1);
-                let candidate_count = u64::try_from(candidate_count).unwrap_or(u64::MAX);
-                let scaled_rate = u128::from(rate) * VIEW_COUNT as u128;
-                let estimate = scaled_rate.div_ceil(u128::from(candidate_count));
-                u64::try_from(estimate).unwrap_or(u64::MAX)
+                if self.parameters.mode == AuthorityMode::Direct {
+                    rate
+                } else {
+                    estimate_per_node_rate(rate, self.parameters.candidate_count)
+                }
             })
         });
         let hard_overload = observed_rate.is_some_and(|rate| self.is_hard_overload(rate))
             || observed_per_node_rate.is_some_and(|rate| self.is_hard_overload(rate));
-        if let Some(rate) = smoothed_rate {
+        if observed_rate.is_some()
+            && let Some(rate) = smoothed_rate
+        {
             let threshold = u128::from(self.config.target_votes_per_node_per_minute)
                 * DIRECT_MODE_PERCENT
                 / 100;
@@ -319,13 +325,22 @@ impl DelegationController {
                 self.low_load_samples = 0;
             }
         }
+        if has_valid_utilization_sample {
+            let threshold =
+                u128::from(self.config.target_votes_per_node_per_minute) * SCALE_DOWN_PERCENT / 100;
+            if estimated_per_node_rate.is_some_and(|rate| u128::from(rate) < threshold) {
+                self.low_utilization_samples = self.low_utilization_samples.saturating_add(1);
+            } else {
+                self.low_utilization_samples = 0;
+            }
+        }
 
         let changed = self.update_parameters(
             sample.at_ms,
             sample.candidate_population,
-            observed_rate,
             smoothed_rate,
             estimated_per_node_rate,
+            has_valid_utilization_sample,
             hard_overload,
         )?;
 
@@ -352,13 +367,13 @@ impl DelegationController {
         &mut self,
         now_ms: u64,
         candidate_population: usize,
-        observed_rate: Option<u64>,
         smoothed_rate: Option<u64>,
         estimated_per_node_rate: Option<u64>,
+        has_valid_utilization_sample: bool,
         hard_overload: bool,
     ) -> Result<bool, ControlLoopError> {
         let target = u128::from(self.config.target_votes_per_node_per_minute);
-        let current_rate = smoothed_rate.or(observed_rate);
+        let current_rate = smoothed_rate;
         let mut next = self.parameters;
 
         match self.parameters.mode {
@@ -408,8 +423,10 @@ impl DelegationController {
                             reporting_interval(rate, self.config.target_votes_per_node_per_minute),
                         )?;
                     }
-                } else if low_load
-                    && self.low_load_samples >= LOW_LOAD_OBSERVATIONS
+                } else if !hard_overload
+                    && has_valid_utilization_sample
+                    && low_load
+                    && self.low_utilization_samples >= LOW_LOAD_OBSERVATIONS
                     && self.dwell_elapsed(now_ms)
                 {
                     let direct_threshold = target * DIRECT_MODE_PERCENT / 100;
@@ -665,6 +682,19 @@ mod tests {
     }
 
     #[test]
+    fn constant_direct_load_without_per_node_reports_does_not_toggle_mode() {
+        let mut controller = controller(direct(AssignmentAlgorithm::XorNearest), 0);
+        for minute in 0..20 {
+            let decision = controller
+                .observe(sample(minute * 60_000, [Some(400); 3], [None; 3], 64))
+                .expect("constant direct-rate sample");
+            assert!(!decision.changed());
+            assert_eq!(decision.parameters().mode(), AuthorityMode::Direct);
+            assert_eq!(decision.estimated_per_node_rate_per_minute(), Some(400));
+        }
+    }
+
+    #[test]
     fn hard_overload_bypasses_dwell_and_scales_up_quantized() {
         let mut controller = controller(direct(AssignmentAlgorithm::XorNearest), 600_000);
         let decision = controller
@@ -778,6 +808,78 @@ mod tests {
             .expect("sustained collapse returns to direct mode");
         assert_eq!(decision.parameters().mode(), AuthorityMode::Direct);
         assert_eq!(decision.parameters().candidate_count(), 0);
+    }
+
+    #[test]
+    fn missing_reports_do_not_count_as_repeated_low_load_evidence() {
+        let initial = DelegationParameters::new(
+            AuthorityMode::Delegated,
+            16,
+            AssignmentAlgorithm::XorNearest,
+            0,
+            DELEGATION_REPORT_INTERVALS_MS[0],
+        )
+        .expect("delegated parameters are valid");
+        let mut controller = controller(initial, 120_000);
+        let first = controller
+            .observe(sample(0, [Some(100); 3], [Some(100); 3], 64))
+            .expect("one valid low-load sample");
+        assert_eq!(first.parameters().candidate_count(), 16);
+        for minute in 1..=5 {
+            let decision = controller
+                .observe(sample(minute * 60_000, [None; 3], [None; 3], 64))
+                .expect("missing reports retain estimates without adding evidence");
+            assert_eq!(decision.parameters().mode(), AuthorityMode::Delegated);
+            assert_eq!(decision.parameters().candidate_count(), 16);
+        }
+    }
+
+    #[test]
+    fn per_node_contraction_has_its_own_sustained_utilization_counter() {
+        let initial = DelegationParameters::new(
+            AuthorityMode::Delegated,
+            64,
+            AssignmentAlgorithm::XorNearest,
+            0,
+            DELEGATION_REPORT_INTERVALS_MS[0],
+        )
+        .expect("delegated parameters are valid");
+        let mut controller = controller(initial, 0);
+        for minute in 0..2 {
+            let decision = controller
+                .observe(sample(minute * 60_000, [Some(1_200); 3], [Some(57); 3], 64))
+                .expect("low per-node utilization despite higher aggregate rate");
+            assert_eq!(decision.parameters().candidate_count(), 64);
+        }
+        let decision = controller
+            .observe(sample(120_000, [Some(1_200); 3], [Some(57); 3], 64))
+            .expect("third sustained low-utilization sample");
+        assert_eq!(decision.parameters().mode(), AuthorityMode::Delegated);
+        assert_eq!(decision.parameters().candidate_count(), 32);
+    }
+
+    #[test]
+    fn hard_overload_never_enters_scale_down_when_candidate_pool_is_full() {
+        let initial = DelegationParameters::new(
+            AuthorityMode::Delegated,
+            16,
+            AssignmentAlgorithm::XorNearest,
+            0,
+            DELEGATION_REPORT_INTERVALS_MS[0],
+        )
+        .expect("delegated parameters are valid");
+        let mut controller = controller(initial, 240_000);
+        for minute in 0..4 {
+            controller
+                .observe(sample(minute * 60_000, [Some(0); 3], [Some(0); 3], 16))
+                .expect("low-load sample");
+        }
+        let decision = controller
+            .observe(sample(240_000, [Some(2_000); 3], [Some(375); 3], 16))
+            .expect("hard overload at full candidate capacity");
+        assert!(decision.hard_overload());
+        assert_eq!(decision.parameters().mode(), AuthorityMode::Delegated);
+        assert_eq!(decision.parameters().candidate_count(), 16);
     }
 
     #[test]
