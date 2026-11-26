@@ -285,6 +285,7 @@ pub enum TransportEvent {
 /// with peer identities, addresses, payloads, and transport events.
 pub struct Transport {
     swarm: Swarm<Behaviour>,
+    remote_addresses: HashMap<libp2p::PeerId, Vec<Multiaddr>>,
     active_requests: HashMap<request_response::OutboundRequestId, RequestId>,
     queued_requests: VecDeque<PendingRequest>,
     failed_requests: VecDeque<(libp2p::PeerId, RequestId)>,
@@ -298,8 +299,20 @@ impl Transport {
     ///
     /// Returns an error if a configured transport or DNS resolver cannot be built.
     pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::with_identity(libp2p::identity::Keypair::generate_ed25519())
+    }
+
+    /// Creates a transport with a caller-provided persistent libp2p identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a configured transport or DNS resolver cannot be built.
+    pub fn with_identity(
+        identity: libp2p::identity::Keypair,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
-            swarm: build_swarm()?,
+            swarm: build_swarm(identity)?,
+            remote_addresses: HashMap::new(),
             active_requests: HashMap::new(),
             queued_requests: VecDeque::new(),
             failed_requests: VecDeque::new(),
@@ -311,6 +324,12 @@ impl Transport {
     #[must_use]
     pub fn peer_id(&self) -> libp2p::PeerId {
         *self.swarm.local_peer_id()
+    }
+
+    /// Returns the currently observed remote transport addresses for a peer.
+    #[must_use]
+    pub fn remote_addresses(&self, peer: &libp2p::PeerId) -> Option<&[Multiaddr]> {
+        self.remote_addresses.get(peer).map(Vec::as_slice)
     }
 
     /// Starts listening on a multiaddress.
@@ -449,10 +468,18 @@ impl Transport {
                 }
                 libp2p::swarm::SwarmEvent::ConnectionEstablished {
                     peer_id,
+                    endpoint,
                     num_established,
                     ..
-                } if num_established.get() == 1 => {
-                    return TransportEvent::PeerConnected(peer_id);
+                } => {
+                    let addresses = self.remote_addresses.entry(peer_id).or_default();
+                    let address = endpoint.get_remote_address().clone();
+                    if !addresses.contains(&address) && addresses.len() < 8 {
+                        addresses.push(address);
+                    }
+                    if num_established.get() == 1 {
+                        return TransportEvent::PeerConnected(peer_id);
+                    }
                 }
                 libp2p::swarm::SwarmEvent::ConnectionClosed {
                     peer_id,
@@ -460,6 +487,7 @@ impl Transport {
                     ..
                 } => {
                     self.fail_queued_for(peer_id);
+                    self.remote_addresses.remove(&peer_id);
                     return TransportEvent::PeerDisconnected(peer_id);
                 }
                 libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::Requests(
@@ -537,8 +565,10 @@ impl Transport {
     }
 }
 
-fn build_swarm() -> Result<Swarm<Behaviour>, Box<dyn std::error::Error + Send + Sync>> {
-    let swarm = SwarmBuilder::with_new_identity()
+fn build_swarm(
+    identity: libp2p::identity::Keypair,
+) -> Result<Swarm<Behaviour>, Box<dyn std::error::Error + Send + Sync>> {
+    let swarm = SwarmBuilder::with_existing_identity(identity)
         .with_tokio()
         .with_tcp(
             tcp::Config::default(),
@@ -725,8 +755,10 @@ mod tests {
     }
 
     async fn request_response_round_trip(protocol: &str) {
-        let mut server = build_swarm().expect("server swarm");
-        let mut client = build_swarm().expect("client swarm");
+        let mut server =
+            build_swarm(libp2p::identity::Keypair::generate_ed25519()).expect("server swarm");
+        let mut client =
+            build_swarm(libp2p::identity::Keypair::generate_ed25519()).expect("client swarm");
         let server_peer = *server.local_peer_id();
         let address: Multiaddr = protocol.parse().expect("loopback multiaddress");
         server.listen_on(address).expect("listen");

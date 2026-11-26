@@ -10,8 +10,12 @@ libp2p.workspace = true
 populus-cluster = { version = "0.1.0", path = "../populus-cluster" }
 populus-crypto = { version = "0.1.0", path = "../populus-crypto" }
 populus-network = { version = "0.1.0", path = "../populus-network" }
+populus-protocol = { version = "0.1.0", path = "../populus-protocol" }
+populus-routing = { version = "0.1.0", path = "../populus-routing" }
 populus-types = { version = "0.1.0", path = "../populus-types" }
 tokio = { workspace = true, features = ["macros", "rt", "signal", "time"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

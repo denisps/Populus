@@ -2080,6 +2080,15 @@ Phase 11.5 is complete when:
 20. ARCHITECTURE.md, TESTING.md, and AGENTS.md document the
     implemented identity lifecycle and verification assumptions.
 
+Current implementation status: the runtime/process, bounded v1 envelope,
+persistent PeerId, local observation/verification state, and localhost bootstrap
+foundation are implemented. Phase 11.5 is not complete until signed candidate
+registration, candidate persistence/ranking, distributed active-NodeID
+arbitration, automatic verifier selection and renewal, authority/delegated-ingest
+network integration, and the five-process/failure-simulation criteria above
+are implemented and validated. Do not treat passing the current local tests as
+evidence that those missing mechanisms are present.
+
 The identity-verification and arbitration assumptions must be stated
 explicitly. Passing a local test does not establish that the protocol
 is secure against arbitrary collusion, eclipse attacks, or partitions.

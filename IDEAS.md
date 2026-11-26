@@ -68,13 +68,12 @@
   in the Phase 16 scenarios before any v2 identity change. Over-merging is
   the accepted v1 cost; the open question is how often one account can buy
   multiple `/48`s.
-- Define a versioned application envelope before any non-vote message shares
-  the request-response stream. The node currently decodes every inbound
-  request as a `DirectVote` and drops the raw bytes on failure. The first
-  shared encoding should be a bounded version tag plus payload, reject
-  unknown versions as typed errors, and leave successful events typed. Do
-  not freeze those bytes until the first authority message exists; until
-  then, do not invent a parallel envelope in the transport adapter.
+- Extend the bounded versioned application envelope with authority and
+  delegated-ingest message families only after their request/response
+  semantics, signatures, and mixed-version behavior are specified. The
+  current v1 envelope covers routing contacts, observed addresses, direct
+  votes, and typed errors; do not make those bytes implicit in transport
+  framing or reinterpret unknown tags as another message.
 - Make direct-ingest acceptance policy consistent across an authority
   membership. Authorities currently persist their own grace and clock-skew
   settings, so mismatched configuration can make the same boundary-delayed
@@ -91,3 +90,7 @@
   time in replicated authority state before wiring it into live transitions.
   Authority replacement or restart must not reset smoothing and dwell in a
   way that causes different members to publish conflicting configurations.
+- Persist bounded identity-observation, verification-renewal, and bootstrap
+  contact state through the Phase 15 storage interfaces. Restore it only as
+  expired/untrusted hints and require fresh reachability and ownership evidence
+  before a saved contact or NodeID can re-enter eligible routing.

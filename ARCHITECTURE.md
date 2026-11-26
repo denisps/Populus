@@ -1002,14 +1002,65 @@ Verifier quorum rules, active-binding arbitration,
 candidate-registry capacity, and eclipse resistance must
 be tested before the relevant protocol behavior is frozen.
 
-Phase 11.5 implements the operational mechanisms and
-deterministic/localhost tests.
+Phase 11.5 runtime work is in progress. The current implementation
+does not claim that all identity ownership or security mechanisms
+below are complete.
 
 Phase 16 performs adversarial protocol hardening.
 
 Phase 17 validates the mechanisms using actual Linux
 network namespaces, NAT, multihoming, and kernel-level
 network failures.
+
+## 5.11 Runtime message and process boundary
+
+The transport continues to carry length-framed application payloads.
+The current application envelope is:
+
+```text
+"POP" || version:u8(1) || message_tag:u8 || canonical_payload
+```
+
+Version 1 defines bounded `FindNode`, routing-contact response,
+observed-address request/response, direct-vote, and typed error messages.
+Unknown versions, tags, malformed fields, trailing bytes, and payloads
+larger than 1 MiB are rejected. A routing response contains at most 20
+contacts; a contact contains at most 8 addresses, each at most 256 bytes.
+PeerId encodings are limited to 128 bytes.
+
+A routing contact carries both `NodeId` and canonical `NetworkIdentity`.
+Decoding verifies that the NodeId derives from the NetworkIdentity, and
+process validation checks the PeerId encoding and address syntax. These
+checks establish internal consistency only. A contact discovered through
+another peer is cached as an unverified bootstrap candidate; it is not
+inserted into an eligible routing table or authority set. Callers must
+independently verify its active binding and direct reachability first.
+
+`PopulusProcess` shares one transport PeerId across independently routed
+logical nodes. Its local identity manager correlates observations by nonce,
+counts distinct authenticated observer PeerIds, normalizes IPv6 addresses
+using the existing `/48` policy, and expires observations and verification
+evidence. The initial limits are four active identities, 64 tracked
+identities, and 64 observers per identity. The direct-verification API
+accepts a result only after its caller has authenticated the candidate
+PeerId, checked the fresh challenge, and established direct reachability;
+the manager itself does not validate signed verifier certificates.
+
+The file-backed PeerIdentityStore persists libp2p protobuf key encoding in
+a create-once file (0600 on Unix). Bootstrap and discovered contacts are
+bounded in memory but are not yet durable. Runtime bootstrap tries up to
+32 configured addresses, caches up to 256 discovered candidates, and
+auto-dials at most 32 of them. These are local resource limits, not
+network-wide protocol limits.
+
+This runtime boundary is intentionally not described as a completed
+Phase 11.5 security protocol: signed candidate registrations, deterministic
+registry sharding, persistence-based standby ranking, quorum-backed
+active-NodeID arbitration, automatic verifier selection/dial-back, periodic
+renewal and recovery, authority/delegated-ingest wire integration, and
+durable bootstrap contacts remain unimplemented. Direct votes received by
+the current CLI are explicitly refused when no authority is available;
+they are not acknowledged as counted.
 
 ---
 

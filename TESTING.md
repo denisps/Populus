@@ -96,6 +96,11 @@ malice
 load
 ```
 
+Identity simulations use the same `IdentityManager` transition logic as
+`populus-node`, advance supplied virtual timestamps without sleeping, and
+use seeded libp2p test keys. They cover distinct-observer thresholds,
+nonce correlation, IPv6 `/48` normalization, and evidence expiration.
+
 ## Level 5: localhost network tests
 
 Exercise actual libp2p transports and framing.
@@ -271,6 +276,21 @@ random removal order
 ```
 
 Assertions concern the returned nearest set and ordering, not internal K-bucket layout unless K-bucket layout itself is being tested.
+
+## 5.1 Identity and application-message tests
+
+The application decoder is tested independently for canonical round trips,
+unknown versions/tags, trailing bytes, invalid identity-to-NodeId bindings,
+and advertised size/count bounds. Node tests cover persistent PeerId reuse,
+malformed key storage, multiple logical routing tables, identity retirement
+isolation, and a real localhost bootstrap exchange before the joining process
+has an active NodeId.
+
+Identity state-machine tests inject authenticated PeerIds, nonce pairs,
+directness, verifier results, and virtual timestamps. They prove that duplicate
+observers do not satisfy quorum, indirect observations cannot advance state,
+stale challenges fail, and verification expiry moves an identity to Suspect
+rather than preserving Active state indefinitely.
 
 ---
 

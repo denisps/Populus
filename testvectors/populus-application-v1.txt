@@ -1,0 +1,17 @@
+# Populus application envelope v1
+# Header: "POP" || version:u8 || message_tag:u8.
+#
+# observed-address-request
+message = RequestObservedAddress
+nonce = 000102030405060708090a0b0c0d0e0f
+encoded = 504f500103000102030405060708090a0b0c0d0e0f
+
+# direct-vote envelope with an opaque four-byte payload (not a valid vote).
+message = DirectVote
+vote_payload = deadbeef
+encoded = 504f50010500000004deadbeef
+
+# typed refusal when no eligible authority is available.
+message = Error
+code = NoActiveAuthority (0x01)
+encoded = 504f50010601

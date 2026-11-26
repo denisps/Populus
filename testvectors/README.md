@@ -88,3 +88,11 @@ content-body bytes, a complete signed object and CID, and its mutable genesis
 revision. It includes a fixed Ed25519 producer and signature so other
 implementations can verify the signature preimage and complete encoding
 independently.
+
+## Application-message vector v1
+
+`populus-application-v1.txt` fixes the `POP` marker, v1 envelope tags,
+nonce byte order, direct-vote payload length, and typed error encoding.
+The decoder also has behavioral tests for bounded routing contacts,
+multiaddress lengths, unsupported versions, malformed fields, and trailing
+bytes.
