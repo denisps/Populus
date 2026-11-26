@@ -341,6 +341,18 @@ async fn run(options: RunOptions) -> Result<(), Box<dyn std::error::Error + Send
                     ProcessEvent::DelegatedIngestAckRejected { peer, error } => {
                         warn!(%peer, %error, "delegated ingest acknowledgement rejected");
                     }
+                    ProcessEvent::CandidateRegistrationAccepted {
+                        peer,
+                        node_id,
+                        registration_hash,
+                    } => info!(%peer, %node_id, ?registration_hash, "candidate registration accepted"),
+                    ProcessEvent::CandidateRegistrationRejected { peer, error } => {
+                        warn!(%peer, %error, "candidate registration rejected");
+                    }
+                    ProcessEvent::CandidateRegistrationAcknowledged {
+                        peer,
+                        registration_hash,
+                    } => info!(%peer, ?registration_hash, "candidate registration acknowledged"),
                     ProcessEvent::ApplicationRequest { peer, message, channel } => {
                         warn!(%peer, ?message, "unsupported application request");
                         if let Err(error) = process.send_response(

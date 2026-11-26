@@ -6,10 +6,14 @@ use std::{
 
 use libp2p::{Multiaddr, PeerId, core::multiaddr::Protocol, identity::Keypair};
 use populus_cluster::{
-    DailyPopularityStatus, DelegatedIngestError, DelegatedIngestState, DelegatedReportReceiver,
-    DelegationDescriptor, DirectIngestError, DirectIngestPolicy, DirectIngestState, DirectVote,
-    DirectVoteOutcome, GenesisManifest, GenesisManifestError, GenesisMember, IngestReport,
-    MembershipView, SignedIngestReportAck, SignedPopularityResponse,
+    AuthorityMember, CandidateRegistration, CandidateRegistry, CommitteeTransitionCertificate,
+    CommitteeTransitionVote, DailyPopularityStatus, DelegatedIngestError, DelegatedIngestState,
+    DelegatedReportReceiver, DelegationDescriptor, DirectIngestError, DirectIngestPolicy,
+    DirectIngestState, DirectVote, DirectVoteOutcome, GenesisManifest, GenesisManifestError,
+    GenesisMember, IngestReport, MembershipView, OwnershipBindingCertificate,
+    OwnershipBindingDecision, OwnershipBindingVote, OwnershipCommittee, OwnershipError,
+    OwnershipState, OwnershipVoteJournal, ReachabilityAttestation, SignedIngestReportAck,
+    SignedPopularityResponse,
 };
 use populus_crypto::{AuthorityKeypair, client_id, node_id};
 use populus_network::{
@@ -168,6 +172,31 @@ pub enum ProcessEvent {
         /// Whether all four authorities have acknowledged and the buffer was reclaimed.
         completed: bool,
     },
+    /// A signed candidate registration was inserted into this process's
+    /// deterministic bounded registry shard.
+    CandidateRegistrationAccepted {
+        /// Authenticated candidate transport peer.
+        peer: PeerId,
+        /// Scarcity-derived candidate identity.
+        node_id: NodeId,
+        /// Stable registration hash acknowledged to the sender.
+        registration_hash: [u8; 32],
+    },
+    /// A candidate registration failed signature, binding, freshness, or
+    /// resource-limit validation.
+    CandidateRegistrationRejected {
+        /// Authenticated sender.
+        peer: PeerId,
+        /// Typed rejection reason.
+        error: ProcessError,
+    },
+    /// A DHT registry peer acknowledged the exact published registration.
+    CandidateRegistrationAcknowledged {
+        /// Authenticated registry peer.
+        peer: PeerId,
+        /// Hash of the exact signed candidate registration.
+        registration_hash: [u8; 32],
+    },
     /// A delegated ACK failed authority identity or ingest-state validation.
     DelegatedIngestAckRejected {
         /// Authenticated responder.
@@ -299,6 +328,9 @@ enum PendingRequest {
     FindNode {
         request_id: u64,
     },
+    CandidateRegistrationAck {
+        registration_hash: [u8; 32],
+    },
     DelegatedIngestAck {
         scope: (ContentId, UtcDay, u8),
         authority_id: populus_types::AuthorityId,
@@ -312,6 +344,10 @@ pub struct PopulusProcess {
     logical_nodes: HashMap<NodeId, LogicalNode>,
     known_contacts: HashMap<(NodeId, PeerId), RoutingContact>,
     verified_peer_nodes: HashMap<PeerId, HashSet<NodeId>>,
+    candidate_registry: CandidateRegistry,
+    ownership_states: HashMap<NodeId, OwnershipState>,
+    ownership_signer: AuthorityKeypair,
+    ownership_journal: Option<Box<dyn OwnershipVoteJournal>>,
     direct_authorities: HashMap<(ContentId, UtcDay), DirectAuthority>,
     delegated_ingest_senders: HashMap<(ContentId, UtcDay, u8), DelegatedIngestSender>,
     delegated_ingest_authorities: HashMap<(ContentId, UtcDay, u8), DelegatedIngestAuthority>,
@@ -336,6 +372,17 @@ impl PopulusProcess {
         keypair: Keypair,
         identity_config: IdentityManagerConfig,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let ed25519_key = keypair
+            .clone()
+            .try_into_ed25519()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let secret = ed25519_key.secret();
+        let mut seed: [u8; 32] = secret
+            .as_ref()
+            .try_into()
+            .map_err(|_| std::io::Error::other("transport key seed has invalid length"))?;
+        let ownership_signer = AuthorityKeypair::from_secret_key(seed);
+        seed.fill(0);
         let transport = Transport::with_identity(keypair)?;
         let identity_manager = IdentityManager::new(transport.peer_id(), identity_config)?;
         Ok(Self {
@@ -344,6 +391,10 @@ impl PopulusProcess {
             logical_nodes: HashMap::new(),
             known_contacts: HashMap::new(),
             verified_peer_nodes: HashMap::new(),
+            candidate_registry: CandidateRegistry::default(),
+            ownership_states: HashMap::new(),
+            ownership_signer,
+            ownership_journal: None,
             direct_authorities: HashMap::new(),
             delegated_ingest_senders: HashMap::new(),
             delegated_ingest_authorities: HashMap::new(),
@@ -369,7 +420,9 @@ impl PopulusProcess {
         identity_config: IdentityManagerConfig,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let keypair = load_or_create_peer_identity(store)?;
-        Self::with_identity(keypair, identity_config)
+        let mut process = Self::with_identity(keypair, identity_config)?;
+        process.ownership_journal = store.open_ownership_vote_journal()?;
+        Ok(process)
     }
 
     /// Returns the persistent transport `PeerId`.
@@ -566,6 +619,503 @@ impl PopulusProcess {
             self.add_verified_contact(activated, contact, peer)?;
         }
         Ok(Some(activated))
+    }
+
+    /// Initializes a subject's epoch-zero ownership committee from the
+    /// explicitly configured and verified genesis manifest.
+    ///
+    /// Genesis subjects themselves are activated by the manifest path; this
+    /// method is for later candidates, whose committee is the four genesis
+    /// members excluding the unbound subject.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError`] when no trusted genesis is configured, the
+    /// subject is already tracked, or the manifest does not supply four
+    /// eligible verifiers distinct from the subject.
+    pub fn initialize_genesis_ownership_state(
+        &mut self,
+        subject: NodeId,
+    ) -> Result<(), ProcessError> {
+        let Some(genesis) = &self.genesis_bootstrap else {
+            return Err(ProcessError::NoTrustedGenesis);
+        };
+        genesis
+            .manifest
+            .verify(&genesis.trusted_public_key)
+            .map_err(ProcessError::GenesisManifest)?;
+        if self.ownership_states.contains_key(&subject) {
+            return Err(ProcessError::OwnershipStateAlreadyConfigured);
+        }
+        let network_id = *genesis.manifest.network_id();
+        let genesis_root = genesis
+            .manifest
+            .hash()
+            .map_err(ProcessError::GenesisManifest)?;
+        let members = genesis
+            .manifest
+            .members()
+            .iter()
+            .map(|member| {
+                AuthorityMember::new(member.node_id(), *member.public_key())
+                    .map_err(|_| ProcessError::InvalidGenesisMember)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let committee =
+            OwnershipCommittee::from_genesis(network_id, subject, genesis_root, members)
+                .map_err(ProcessError::Ownership)?;
+        self.ownership_states
+            .insert(subject, OwnershipState::new(committee));
+        Ok(())
+    }
+
+    /// Deterministically proposes the next committee from the supplied
+    /// eligibility snapshot for an already trusted ownership state.
+    ///
+    /// The proposal is not active until a 3-of-4 certificate is applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::UnknownOwnershipState`] when the subject has no
+    /// trusted genesis committee, or an ownership error for an invalid
+    /// snapshot.
+    pub fn propose_ownership_committee_transition(
+        &self,
+        subject: NodeId,
+        eligibility_snapshot: Vec<AuthorityMember>,
+    ) -> Result<OwnershipCommittee, ProcessError> {
+        self.ownership_states
+            .get(&subject)
+            .ok_or(ProcessError::UnknownOwnershipState)?
+            .committee()
+            .next_committee(eligibility_snapshot)
+            .map_err(ProcessError::Ownership)
+    }
+
+    /// Durably records and signs one next-committee proposal vote.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::Ownership`] when durable storage is unavailable,
+    /// or the local signer is not an exact current committee member.
+    pub fn sign_ownership_committee_transition(
+        &mut self,
+        subject: NodeId,
+        next_committee: &OwnershipCommittee,
+    ) -> Result<CommitteeTransitionVote, ProcessError> {
+        let journal = self
+            .ownership_journal
+            .as_deref_mut()
+            .ok_or(ProcessError::Ownership(OwnershipError::JournalFailure))?;
+        let current = self
+            .ownership_states
+            .get(&subject)
+            .ok_or(ProcessError::UnknownOwnershipState)?
+            .committee();
+        CommitteeTransitionVote::sign(current, next_committee, &self.ownership_signer, journal)
+            .map_err(ProcessError::Ownership)
+    }
+
+    /// Applies a transition certificate only to the exact currently installed
+    /// committee chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::UnknownOwnershipState`] or an ownership error
+    /// for a stale/competing transition.
+    pub fn apply_ownership_committee_transition(
+        &mut self,
+        subject: NodeId,
+        certificate: CommitteeTransitionCertificate,
+    ) -> Result<(), ProcessError> {
+        self.ownership_states
+            .get_mut(&subject)
+            .ok_or(ProcessError::UnknownOwnershipState)?
+            .apply_transition(certificate)
+            .map_err(ProcessError::Ownership)
+    }
+
+    /// Signs and locally indexes a candidate registration using the process's
+    /// persistent transport key. The candidate must already be discovered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::Ownership`] if the local identity is not yet
+    /// observed or the registration fields are invalid.
+    pub fn create_candidate_registration(
+        &mut self,
+        network_id: [u8; 32],
+        identity: NetworkIdentity,
+        sequence: u64,
+        expires_at_ms: u64,
+        addresses: Vec<String>,
+        now_ms: u64,
+    ) -> Result<CandidateRegistration, ProcessError> {
+        if !matches!(
+            self.identity_manager.lifecycle(&identity),
+            IdentityLifecycle::Discovered
+                | IdentityLifecycle::Verifying
+                | IdentityLifecycle::Active
+                | IdentityLifecycle::Suspect
+        ) {
+            return Err(ProcessError::Ownership(OwnershipError::InvalidCandidate));
+        }
+        if self
+            .genesis_bootstrap
+            .as_ref()
+            .is_some_and(|genesis| genesis.manifest.network_id() != &network_id)
+        {
+            return Err(ProcessError::Ownership(OwnershipError::CommitteeMismatch));
+        }
+        let registration = CandidateRegistration::sign(
+            network_id,
+            identity,
+            self.peer_id().to_bytes(),
+            sequence,
+            expires_at_ms,
+            addresses,
+            &self.ownership_signer,
+        )
+        .map_err(ProcessError::Ownership)?;
+        self.register_candidate_registration(self.peer_id(), registration.clone(), now_ms)?;
+        Ok(registration)
+    }
+
+    /// Validates and indexes a registration received from its exact
+    /// authenticated transport `PeerId`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError`] for an identity/key/PeerId mismatch, indirect
+    /// address, stale registration, or bounded-registry overflow.
+    pub fn register_candidate_registration(
+        &mut self,
+        authenticated_peer: PeerId,
+        registration: CandidateRegistration,
+        now_ms: u64,
+    ) -> Result<[u8; 32], ProcessError> {
+        let registered_peer = PeerId::from_bytes(registration.peer_id())
+            .map_err(|_| ProcessError::Ownership(OwnershipError::InvalidCandidate))?;
+        if registered_peer != authenticated_peer
+            || !candidate_addresses_match_identity(&registration)
+            || self
+                .genesis_bootstrap
+                .as_ref()
+                .is_some_and(|genesis| genesis.manifest.network_id() != registration.network_id())
+        {
+            return Err(ProcessError::Ownership(OwnershipError::InvalidCandidate));
+        }
+        let hash = registration.hash().map_err(ProcessError::Ownership)?;
+        self.candidate_registry
+            .insert(registration, now_ms)
+            .map_err(ProcessError::Ownership)?;
+        Ok(hash)
+    }
+
+    /// Returns one bounded local candidate-registry page.
+    ///
+    /// This reads only the process's local shard; distributed lookup and
+    /// replication remain a caller-managed DHT operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::Ownership`] when the page size is outside
+    /// `1..=64`.
+    pub fn candidate_registration_page(
+        &self,
+        network_id: [u8; 32],
+        subject: NodeId,
+        shard: u8,
+        after_peer_id: Option<&[u8]>,
+        limit: usize,
+        now_ms: u64,
+    ) -> Result<Vec<CandidateRegistration>, ProcessError> {
+        if !(1..=64).contains(&limit) {
+            return Err(ProcessError::Ownership(OwnershipError::CandidateLimit));
+        }
+        Ok(self
+            .candidate_registry
+            .page(network_id, subject, shard, after_peer_id, limit, now_ms)
+            .into_iter()
+            .cloned()
+            .collect())
+    }
+
+    /// Publishes a local signed candidate registration to the four nearest
+    /// known nodes for its deterministic candidate shard.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError`] when the registration is not signed by this
+    /// transport identity, no active routing node or shard peers are known,
+    /// or the bounded transport rejects a request.
+    pub fn publish_candidate_registration(
+        &mut self,
+        routing_node: NodeId,
+        registration: &CandidateRegistration,
+    ) -> Result<Vec<RequestId>, ProcessError> {
+        let now_ms = now_millis();
+        registration
+            .verify(now_ms)
+            .map_err(ProcessError::Ownership)?;
+        if registration.peer_id() != self.peer_id().to_bytes()
+            || !candidate_addresses_match_identity(registration)
+        {
+            return Err(ProcessError::Ownership(OwnershipError::InvalidCandidate));
+        }
+        let shard = populus_cluster::candidate_registry_shard(registration.peer_id());
+        let key = populus_cluster::candidate_registry_key(
+            *registration.network_id(),
+            registration.node_id(),
+            shard,
+        )
+        .ok_or(ProcessError::Ownership(OwnershipError::InvalidCandidate))?;
+        let logical = self
+            .logical_nodes
+            .get(&routing_node)
+            .ok_or(ProcessError::UnknownLogicalNode)?;
+        let contacts = logical
+            .routing
+            .closest_nodes(&key, 4)
+            .into_iter()
+            .filter_map(|node_id| logical.contacts.get(&node_id))
+            .take(4)
+            .cloned()
+            .collect::<Vec<_>>();
+        if contacts.is_empty() {
+            return Err(ProcessError::NoCandidateRegistryPeers);
+        }
+        let payload = registration
+            .canonical_bytes()
+            .map_err(ProcessError::Ownership)?;
+        let message = ApplicationMessage::CandidateRegistration {
+            registration: payload,
+        };
+        let mut requests = Vec::with_capacity(contacts.len());
+        for contact in contacts {
+            if self.pending_requests.len() >= MAX_PENDING_REQUESTS {
+                return Err(ProcessError::CandidateRegistrationSendRejected(
+                    SendRequestError::QueueFull,
+                ));
+            }
+            let peer =
+                PeerId::from_bytes(&contact.peer_id).map_err(|_| ProcessError::InvalidContact)?;
+            let addresses = contact
+                .addresses
+                .iter()
+                .map(|address| address.parse())
+                .collect::<Result<Vec<Multiaddr>, _>>()
+                .map_err(|_| ProcessError::InvalidContact)?;
+            let request_id = match self.send_message(peer, addresses, &message) {
+                Ok(request_id) => request_id,
+                Err(ApplicationSendError::Encoding(error)) => {
+                    return Err(ProcessError::InvalidApplicationMessage(error));
+                }
+                Err(ApplicationSendError::Transport(error)) => {
+                    return Err(ProcessError::CandidateRegistrationSendRejected(error));
+                }
+            };
+            self.pending_requests.insert(
+                request_id,
+                PendingRequest::CandidateRegistrationAck {
+                    registration_hash: registration.hash().map_err(ProcessError::Ownership)?,
+                },
+            );
+            requests.push(request_id);
+        }
+        Ok(requests)
+    }
+
+    /// Creates a binding decision using the exact current committee and
+    /// previous certificate chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::UnknownOwnershipState`] when no trusted
+    /// committee is installed, or a typed ownership error for invalid input.
+    pub fn create_ownership_binding_decision(
+        &self,
+        subject: NodeId,
+        registration: &CandidateRegistration,
+        valid_until_ms: u64,
+        now_ms: u64,
+    ) -> Result<OwnershipBindingDecision, ProcessError> {
+        let state = self
+            .ownership_states
+            .get(&subject)
+            .ok_or(ProcessError::UnknownOwnershipState)?;
+        let (generation, previous_hash) = match state.binding() {
+            Some(binding) => (
+                binding
+                    .decision()
+                    .generation()
+                    .checked_add(1)
+                    .ok_or(ProcessError::Ownership(OwnershipError::StaleBinding))?,
+                *binding.hash(),
+            ),
+            None => (0, [0; 32]),
+        };
+        OwnershipBindingDecision::new(
+            state.committee(),
+            generation,
+            previous_hash,
+            registration,
+            valid_until_ms,
+            now_ms,
+        )
+        .map_err(ProcessError::Ownership)
+    }
+
+    /// Signs a direct-reachability attestation only when this process has an
+    /// active non-relayed connection to the exact candidate `PeerId` and sees
+    /// the advertised normalized identity on that connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::Ownership`] when no direct identity-matching
+    /// connection exists or the current committee does not include this node.
+    pub fn attest_candidate_reachability(
+        &self,
+        subject: NodeId,
+        decision: &OwnershipBindingDecision,
+        challenge: [u8; 16],
+        checked_at_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<ReachabilityAttestation, ProcessError> {
+        let state = self
+            .ownership_states
+            .get(&subject)
+            .ok_or(ProcessError::UnknownOwnershipState)?;
+        let registration = self
+            .candidate_registry
+            .get(*state.committee().network_id(), subject, decision.peer_id())
+            .ok_or(ProcessError::Ownership(OwnershipError::InvalidCandidate))?;
+        let peer = PeerId::from_bytes(registration.peer_id())
+            .map_err(|_| ProcessError::Ownership(OwnershipError::InvalidCandidate))?;
+        let directly_connected = self
+            .transport
+            .direct_connected_peers()
+            .any(|connected| connected == peer);
+        let observed_identity = self
+            .transport
+            .remote_addresses(&peer)
+            .is_some_and(|addresses| {
+                addresses.iter().any(|address| {
+                    socket_addr_from_multiaddr(address)
+                        .and_then(|endpoint| NetworkIdentity::from_ip(endpoint.ip()).ok())
+                        == Some(registration.identity())
+                })
+            });
+        if !directly_connected || !observed_identity {
+            return Err(ProcessError::Ownership(OwnershipError::InvalidAttestation));
+        }
+        ReachabilityAttestation::sign(
+            state.committee(),
+            decision,
+            registration,
+            challenge,
+            checked_at_ms,
+            expires_at_ms,
+            &self.ownership_signer,
+        )
+        .map_err(ProcessError::Ownership)
+    }
+
+    /// Records a binding vote through the durable-before-signing journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::Ownership`] if no durable journal is available,
+    /// the signer is not an exact committee member, or the vote conflicts with
+    /// an earlier persisted decision.
+    pub fn sign_ownership_binding_vote(
+        &mut self,
+        subject: NodeId,
+        decision: &OwnershipBindingDecision,
+        registration: &CandidateRegistration,
+        attestation: ReachabilityAttestation,
+        now_ms: u64,
+    ) -> Result<OwnershipBindingVote, ProcessError> {
+        let journal = self
+            .ownership_journal
+            .as_deref_mut()
+            .ok_or(ProcessError::Ownership(OwnershipError::JournalFailure))?;
+        let state = self
+            .ownership_states
+            .get(&subject)
+            .ok_or(ProcessError::UnknownOwnershipState)?;
+        OwnershipBindingVote::sign(
+            state.committee(),
+            decision,
+            registration,
+            attestation,
+            &self.ownership_signer,
+            journal,
+            now_ms,
+        )
+        .map_err(ProcessError::Ownership)
+    }
+
+    /// Applies a quorum certificate only under the currently committed
+    /// committee; a local selected candidate activates only after discovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError`] for stale or conflicting certificates and
+    /// local identity lifecycle or capacity failures.
+    pub fn apply_ownership_binding_certificate(
+        &mut self,
+        subject: NodeId,
+        certificate: &OwnershipBindingCertificate,
+        now_ms: u64,
+    ) -> Result<(), ProcessError> {
+        let mut next_state = self
+            .ownership_states
+            .get(&subject)
+            .cloned()
+            .ok_or(ProcessError::UnknownOwnershipState)?;
+        next_state
+            .apply_binding(certificate.clone(), now_ms)
+            .map_err(ProcessError::Ownership)?;
+
+        let local_peer = self.peer_id().to_bytes();
+        let selected_local = certificate.decision().peer_id() == local_peer;
+        let previously_local = self
+            .ownership_states
+            .get(&subject)
+            .and_then(OwnershipState::binding)
+            .is_some_and(|binding| binding.decision().peer_id() == local_peer);
+        let identity = certificate.registration().identity();
+
+        if selected_local {
+            self.identity_manager
+                .activate_certified_binding(identity, now_ms)
+                .map_err(ProcessError::IdentityManager)?;
+            self.logical_nodes
+                .entry(subject)
+                .or_insert_with(|| LogicalNode {
+                    network_identity: identity,
+                    node_id: subject,
+                    routing: RoutingTable::new(subject),
+                    contacts: HashMap::new(),
+                });
+        } else if previously_local {
+            let old_identity = self
+                .ownership_states
+                .get(&subject)
+                .and_then(OwnershipState::binding)
+                .map(|binding| binding.registration().identity())
+                .ok_or(ProcessError::UnknownOwnershipState)?;
+            self.identity_manager
+                .retire(old_identity)
+                .map_err(ProcessError::IdentityManager)?;
+            self.identity_manager
+                .remove(old_identity)
+                .map_err(ProcessError::IdentityManager)?;
+            self.logical_nodes.remove(&subject);
+        }
+        self.ownership_states.insert(subject, next_state);
+        Ok(())
     }
 
     /// Applies an injected direct observation from an already verified active `NodeId`.
@@ -1315,11 +1865,60 @@ impl PopulusProcess {
             ApplicationMessage::DelegatedIngestReport { report } => {
                 Some(self.handle_delegated_ingest_report(peer, &report, channel))
             }
+            ApplicationMessage::CandidateRegistration { registration } => {
+                Some(self.handle_candidate_registration(peer, &registration, channel))
+            }
             message => Some(ProcessEvent::ApplicationRequest {
                 peer,
                 message,
                 channel,
             }),
+        }
+    }
+
+    fn handle_candidate_registration(
+        &mut self,
+        peer: PeerId,
+        payload: &[u8],
+        channel: ResponseChannel,
+    ) -> ProcessEvent {
+        let registration = match CandidateRegistration::from_canonical_bytes(payload) {
+            Ok(registration) => registration,
+            Err(error) => {
+                if let Some(event) =
+                    self.send_error_response(peer, ApplicationErrorCode::InvalidRequest, channel)
+                {
+                    return event;
+                }
+                return ProcessEvent::CandidateRegistrationRejected {
+                    peer,
+                    error: ProcessError::Ownership(error),
+                };
+            }
+        };
+        let node_id = registration.node_id();
+        let registration_hash =
+            match self.register_candidate_registration(peer, registration, now_millis()) {
+                Ok(hash) => hash,
+                Err(error) => {
+                    if let Some(event) = self.send_error_response(
+                        peer,
+                        ApplicationErrorCode::InvalidRequest,
+                        channel,
+                    ) {
+                        return event;
+                    }
+                    return ProcessEvent::CandidateRegistrationRejected { peer, error };
+                }
+            };
+        let response = ApplicationMessage::CandidateRegistrationAck { registration_hash };
+        if let Some(event) = self.send_protocol_response(peer, &response, channel) {
+            return event;
+        }
+        ProcessEvent::CandidateRegistrationAccepted {
+            peer,
+            node_id,
+            registration_hash,
         }
     }
 
@@ -1628,6 +2227,17 @@ impl PopulusProcess {
                 },
                 ApplicationMessage::DelegatedIngestAck { acknowledgement },
             ) => self.handle_delegated_ingest_ack(peer, scope, authority_id, &acknowledgement),
+            (
+                PendingRequest::CandidateRegistrationAck {
+                    registration_hash: expected,
+                },
+                ApplicationMessage::CandidateRegistrationAck {
+                    registration_hash: received,
+                },
+            ) if expected == received => ProcessEvent::CandidateRegistrationAcknowledged {
+                peer,
+                registration_hash: received,
+            },
             (
                 PendingRequest::FindNode {
                     request_id: expected,
@@ -1940,8 +2550,20 @@ pub enum ProcessError {
     DelegatedIngest(DelegatedIngestError),
     /// The signed genesis manifest or its trust anchor is invalid.
     GenesisManifest(GenesisManifestError),
+    /// A signed ownership protocol transition is invalid or conflicts.
+    Ownership(OwnershipError),
     /// A genesis manifest was already configured for this process.
     GenesisManifestAlreadyConfigured,
+    /// An ownership state cannot be initialized without a verified genesis.
+    NoTrustedGenesis,
+    /// An ownership state already exists for this subject.
+    OwnershipStateAlreadyConfigured,
+    /// No ownership committee is installed for this subject.
+    UnknownOwnershipState,
+    /// No eligible DHT contact exists for a candidate registry shard.
+    NoCandidateRegistryPeers,
+    /// Candidate registration could not be sent over the bounded transport.
+    CandidateRegistrationSendRejected(SendRequestError),
     /// This process's persistent `PeerId` is not listed in the genesis manifest.
     LocalPeerNotInGenesisManifest,
     /// A genesis member's transport public key, `PeerId`, or address is inconsistent.
@@ -1979,7 +2601,21 @@ impl std::fmt::Display for ProcessError {
             Self::GenesisManifest(error) => {
                 return write!(formatter, "genesis manifest rejected: {error}");
             }
+            Self::Ownership(error) => {
+                return write!(formatter, "ownership protocol rejected transition: {error}");
+            }
             Self::GenesisManifestAlreadyConfigured => "genesis manifest was already configured",
+            Self::NoTrustedGenesis => "a trusted genesis manifest is required",
+            Self::OwnershipStateAlreadyConfigured => {
+                "ownership state is already configured for this NodeId"
+            }
+            Self::UnknownOwnershipState => "ownership state is not configured for this NodeId",
+            Self::NoCandidateRegistryPeers => {
+                "candidate registry shard has no eligible DHT contacts"
+            }
+            Self::CandidateRegistrationSendRejected(error) => {
+                return write!(formatter, "candidate registration send failed: {error:?}");
+            }
             Self::LocalPeerNotInGenesisManifest => {
                 "local PeerId is absent from the genesis manifest"
             }
@@ -2036,6 +2672,27 @@ fn validate_genesis_member(
     Ok((peer, addresses))
 }
 
+fn candidate_addresses_match_identity(registration: &CandidateRegistration) -> bool {
+    !registration.addresses().is_empty()
+        && registration.addresses().iter().all(|encoded| {
+            let Ok(address) = encoded.parse::<Multiaddr>() else {
+                return false;
+            };
+            if address.iter().any(|protocol| {
+                matches!(protocol, Protocol::P2pCircuit)
+                    || matches!(
+                        protocol,
+                        Protocol::P2p(peer) if peer.to_bytes() != registration.peer_id()
+                    )
+            }) {
+                return false;
+            }
+            socket_addr_from_multiaddr(&address)
+                .and_then(|endpoint| NetworkIdentity::from_ip(endpoint.ip()).ok())
+                == Some(registration.identity())
+        })
+}
+
 fn socket_addr_from_multiaddr(address: &Multiaddr) -> Option<SocketAddr> {
     if address
         .iter()
@@ -2074,11 +2731,11 @@ mod tests {
 
     use std::time::Duration;
 
-    use libp2p::identity::Keypair;
+    use libp2p::{core::multiaddr::Protocol, identity::Keypair};
     use populus_cluster::{
-        AssignmentAlgorithm, AuthorityMember, DelegatedIngestState, DelegationDescriptor,
-        DirectIngestPolicy, DirectVote, GenesisManifest, GenesisMember, IngestNode, MembershipView,
-        select_authorities,
+        AssignmentAlgorithm, AuthorityMember, CandidateRegistration, DelegatedIngestState,
+        DelegationDescriptor, DirectIngestPolicy, DirectVote, GenesisManifest, GenesisMember,
+        IngestNode, MembershipView, OwnershipError, select_authorities,
     };
     use populus_crypto::AuthorityKeypair;
     use populus_types::{ClientId, ContentId, NetworkIdentity, NodeId, RoutingKey, UtcDay};
@@ -2125,6 +2782,151 @@ mod tests {
             })
             .collect::<Vec<_>>();
         GenesisManifest::sign([7; 32], members, trust_key).expect("signed manifest")
+    }
+
+    fn transport_signer(keypair: &Keypair) -> AuthorityKeypair {
+        let ed25519 = keypair
+            .clone()
+            .try_into_ed25519()
+            .expect("Ed25519 transport identity");
+        let secret = ed25519
+            .secret()
+            .as_ref()
+            .try_into()
+            .expect("32-byte transport seed");
+        AuthorityKeypair::from_secret_key(secret)
+    }
+
+    async fn process_listening_address(process: &mut PopulusProcess) -> libp2p::Multiaddr {
+        let peer = process.peer_id();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let ProcessEvent::Transport(populus_network::TransportEvent::Listening(
+                    address,
+                )) = process.next_event().await
+                {
+                    break address.with(Protocol::P2p(peer));
+                }
+            }
+        })
+        .await
+        .expect("process begins listening")
+    }
+
+    #[tokio::test]
+    async fn candidate_registration_is_authenticated_and_acknowledged_on_wire() {
+        let server_key = Keypair::generate_ed25519();
+        let client_key = Keypair::generate_ed25519();
+        let expected_peer = client_key.public().to_peer_id();
+        let signer = transport_signer(&client_key);
+        let public_key = signer.public_key();
+        assert_eq!(
+            CandidateRegistration::peer_id_for_public_key(&public_key),
+            expected_peer.to_bytes(),
+            "candidate identity derivation must match libp2p PeerId"
+        );
+        let identity =
+            NetworkIdentity::from_ip("8.8.8.8".parse().expect("public IP")).expect("identity");
+        let registration = CandidateRegistration::sign(
+            [7; 32],
+            identity,
+            expected_peer.to_bytes(),
+            1,
+            super::now_millis() + 60_000,
+            vec!["/ip4/8.8.8.8/tcp/4001".to_owned()],
+            &signer,
+        )
+        .expect("valid signed candidate");
+        registration
+            .verify(super::now_millis())
+            .expect("candidate remains valid");
+        assert!(super::candidate_addresses_match_identity(&registration));
+        CandidateRegistration::from_canonical_bytes(
+            &registration
+                .canonical_bytes()
+                .expect("canonical registration"),
+        )
+        .expect("registration wire decoder");
+        let registration_hash = registration.hash().expect("registration hash");
+
+        let mut server =
+            PopulusProcess::with_identity(server_key, IdentityManagerConfig::default())
+                .expect("server process");
+        let mut client =
+            PopulusProcess::with_identity(client_key, IdentityManagerConfig::default())
+                .expect("client process");
+        let impostor_peer = Keypair::generate_ed25519().public().to_peer_id();
+        assert!(matches!(
+            server.register_candidate_registration(
+                impostor_peer,
+                registration.clone(),
+                super::now_millis(),
+            ),
+            Err(ProcessError::Ownership(OwnershipError::InvalidCandidate))
+        ));
+        server
+            .listen_on(
+                populus_network::parse_multiaddr("/ip4/127.0.0.1/tcp/0").expect("listen address"),
+            )
+            .expect("listen");
+        let address = process_listening_address(&mut server).await;
+        let payload = registration
+            .canonical_bytes()
+            .expect("canonical registration");
+        let request_id = client
+            .send_message(
+                server.peer_id(),
+                vec![address],
+                &ApplicationMessage::CandidateRegistration {
+                    registration: payload,
+                },
+            )
+            .expect("candidate registration request");
+        client.pending_requests.insert(
+            request_id,
+            PendingRequest::CandidateRegistrationAck { registration_hash },
+        );
+
+        let (accepted, acknowledged) = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut accepted = None;
+            let mut acknowledged = None;
+            while accepted.is_none() || acknowledged.is_none() {
+                tokio::select! {
+                    event = server.next_event(), if accepted.is_none() => {
+                        if let ProcessEvent::CandidateRegistrationAccepted {
+                            peer,
+                            node_id,
+                            registration_hash,
+                        } = event {
+                            accepted = Some((peer, node_id, registration_hash));
+                        }
+                    }
+                    event = client.next_event(), if acknowledged.is_none() => {
+                        if let ProcessEvent::CandidateRegistrationAcknowledged {
+                            peer,
+                            registration_hash,
+                        } = event {
+                            acknowledged = Some((peer, registration_hash));
+                        }
+                    }
+                }
+            }
+            (accepted, acknowledged)
+        })
+        .await
+        .expect("candidate registration request and acknowledgement");
+        assert_eq!(
+            accepted.expect("accepted event"),
+            (
+                client.peer_id(),
+                populus_crypto::node_id(&identity),
+                registration_hash
+            )
+        );
+        assert_eq!(
+            acknowledged.expect("acknowledged event"),
+            (server.peer_id(), registration_hash)
+        );
     }
 
     #[test]

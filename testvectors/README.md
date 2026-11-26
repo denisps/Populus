@@ -99,3 +99,11 @@ envelopes.
 The decoder also has behavioral tests for bounded routing contacts,
 multiaddress lengths, unsupported versions, malformed fields, and trailing
 bytes.
+
+## Ownership vector v1
+
+`ownership-v1.txt` fixes the canonical signed candidate-registration record
+for an Ed25519 transport identity. The cluster test reconstructs the record
+from the fixed seed, normalized IPv4 identity, network identifier, sequence,
+expiry, and direct address, then compares every encoded byte including the
+signature.

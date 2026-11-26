@@ -1055,33 +1055,51 @@ genesis. Missing or unreachable bootstrap peers never activate genesis.
 
 Candidate registrations are signed by the transport identity they bind,
 sequence-numbered, expiring discovery records, not ownership certificates.
-The existing Populus DHT stores them in a bounded deterministic shard index;
-enumeration is paginated and bounded. Standby preference is derived only from
-independently verified renewal/reachability history, then ordered by
-`PeerId`. Self-reported uptime, extra ports, registration volume, and improved
-ranking do not rotate a healthy incumbent. A standby can be promoted only by a
-valid binding decision under the committee chain above.
+The current implementation validates the signed `PeerId`, its Ed25519 key,
+the normalized `NetworkIdentity`, direct address shape, freshness, and
+sequence. A deterministic 64-shard index is bounded to 64 candidates per
+shard and 4096 total, scoped by network identifier, `NodeId`, and shard.
+Bounded local enumeration and versioned registration/acknowledgement messages
+exist. The runtime can manually publish to the four closest known contacts for
+the shard; it does not perform iterative shard lookup, expose a network page
+query, persist candidate state, or continuously renew registrations.
 
-The local identity manager now keys observation evidence by active `NodeId`
+Committee selection, explicit next-committee proposals, 3-of-4 chained
+transition certificates, challenge-bound reachability attestations,
+committee-bound binding decisions, and 3-of-4 ownership certificates are
+implemented as typed cluster state machines. Binding application preserves a
+valid incumbent lease and rejects a conflicting replacement until expiry.
+The process exposes APIs to propose/sign/apply transitions, attest a directly
+connected matching candidate, journal a vote before signing, and apply a
+certificate to local identity activation/retirement. The file-backed identity
+store supplies a durable anti-equivocation journal; callers using ephemeral
+identity construction fail closed when signing. However, transition and
+binding votes/certificates are not yet encoded for network transport or
+automatically collected, the ownership chain and binding are not restored
+durably after restart, verifier eligibility snapshots are caller-supplied
+rather than automatically derived from a committed active membership view,
+and challenge creation/dial-back is not automated. These APIs and local tests
+therefore do not establish distributed ownership safety.
+
+The local identity manager keys observation evidence by active `NodeId`
 rather than connection `PeerId`; its injectable observation boundary remains
 separate from the production `NetworkIdentity` validator. Direct and delegated
 ingest have bounded wire adapters into the existing cluster state machines,
-but their membership is installed by the caller. The application still lacks
-the certified committee chain, signed candidate registry, durable
-anti-equivocation journal, automatic verifier selection, and authority
-discovery/state-replication. A signed four-member genesis manifest and
-out-of-band trust key can now be loaded by the runtime; each local process
-activates only after direct authenticated connections to the other three
-manifest peers and three distinct manifest-member observations agree on its
-identity. Genesis addresses are intentionally restricted to direct IP
-multiaddresses matching the declared normalized identity. The runtime does
-not compare the manifest's network identifier to a separately configured
-network identifier, and manifest membership is not a substitute for the
-missing committee-transition protocol. The delegated adapter also requires
-the caller to send a pending report to each eligible authority; it does not
-perform membership discovery, automatic four-authority fanout/retry, durable
-sender/receiver recovery, or replacement. Local state-machine tests do not
-establish distributed ownership safety.
+but their membership is installed by the caller. A signed four-member genesis
+manifest and out-of-band trust key can be loaded by the runtime; each local
+process activates only after direct authenticated connections to the other
+three manifest peers and three distinct manifest-member observations agree on
+its identity. Candidate registration is checked against the manifest network
+when genesis is configured, and the registry/shard key is network-scoped.
+There is not yet a separately configured process network identifier, so a
+manifest is not checked against an independent runtime network setting.
+Genesis addresses are restricted to direct IP multiaddresses matching the
+declared normalized identity; bootstrap failure never activates genesis.
+The delegated adapter still requires caller-installed membership and
+caller-driven eligible-authority sends; automatic membership discovery,
+four-authority fanout/retry, durable sender/receiver recovery, and replacement
+remain absent. Local state-machine tests do not establish distributed
+ownership safety.
 
 Phase 11.5 runtime work is in progress. The current implementation
 does not claim that all identity ownership or security mechanisms

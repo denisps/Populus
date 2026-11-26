@@ -29,6 +29,8 @@ const POPULARITY_QUERY: u8 = 8;
 const POPULARITY_RESPONSE: u8 = 9;
 const DELEGATED_INGEST_REPORT: u8 = 10;
 const DELEGATED_INGEST_ACK: u8 = 11;
+const CANDIDATE_REGISTRATION: u8 = 12;
+const CANDIDATE_REGISTRATION_ACK: u8 = 13;
 
 /// Typed refusal codes for requests that cannot be handled by the selected process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +140,16 @@ pub enum ApplicationMessage {
     DelegatedIngestAck {
         /// Canonical signed acknowledgement from `populus-cluster`.
         acknowledgement: Vec<u8>,
+    },
+    /// Signed, expiring `NodeId` candidate registration.
+    CandidateRegistration {
+        /// Canonical registration bytes from `populus-cluster`.
+        registration: Vec<u8>,
+    },
+    /// Acknowledgement that the candidate registration was indexed.
+    CandidateRegistrationAck {
+        /// Hash of the exact signed registration.
+        registration_hash: [u8; 32],
     },
 }
 
@@ -273,6 +285,14 @@ impl ApplicationMessage {
                 bytes.push(DELEGATED_INGEST_ACK);
                 append_payload(&mut bytes, acknowledgement)?;
             }
+            Self::CandidateRegistration { registration } => {
+                bytes.push(CANDIDATE_REGISTRATION);
+                append_payload(&mut bytes, registration)?;
+            }
+            Self::CandidateRegistrationAck { registration_hash } => {
+                bytes.push(CANDIDATE_REGISTRATION_ACK);
+                bytes.extend_from_slice(registration_hash);
+            }
         }
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(ProtocolError::MessageTooLarge);
@@ -348,16 +368,9 @@ impl ApplicationMessage {
                 let endpoint = SocketAddr::new(ip, decoder.u16()?);
                 Self::ObservedAddress { nonce, endpoint }
             }
-            DIRECT_VOTE => {
-                let length =
-                    usize::try_from(decoder.u32()?).map_err(|_| ProtocolError::MessageTooLarge)?;
-                if length > MAX_MESSAGE_SIZE {
-                    return Err(ProtocolError::MessageTooLarge);
-                }
-                Self::DirectVote {
-                    vote: decoder.take(length)?.to_vec(),
-                }
-            }
+            DIRECT_VOTE => Self::DirectVote {
+                vote: decode_payload(&mut decoder)?,
+            },
             ERROR_RESPONSE => {
                 let code = match decoder.u8()? {
                     1 => ApplicationErrorCode::NoActiveAuthority,
@@ -367,35 +380,29 @@ impl ApplicationMessage {
                 };
                 Self::Error { code }
             }
-            DIRECT_VOTE_ACK => {
-                let length = decoder.payload_length()?;
-                Self::DirectVoteAck {
-                    acknowledgement: decoder.take(length)?.to_vec(),
-                }
-            }
+            DIRECT_VOTE_ACK => Self::DirectVoteAck {
+                acknowledgement: decode_payload(&mut decoder)?,
+            },
             POPULARITY_QUERY => Self::PopularityQuery {
                 content_id: ContentId::from_bytes(decoder.array::<36>()?)
                     .map_err(|_| ProtocolError::InvalidField)?,
                 day: UtcDay::from_bytes(decoder.array()?),
             },
-            POPULARITY_RESPONSE => {
-                let length = decoder.payload_length()?;
-                Self::PopularityResponse {
-                    response: decoder.take(length)?.to_vec(),
-                }
-            }
-            DELEGATED_INGEST_REPORT => {
-                let length = decoder.payload_length()?;
-                Self::DelegatedIngestReport {
-                    report: decoder.take(length)?.to_vec(),
-                }
-            }
-            DELEGATED_INGEST_ACK => {
-                let length = decoder.payload_length()?;
-                Self::DelegatedIngestAck {
-                    acknowledgement: decoder.take(length)?.to_vec(),
-                }
-            }
+            POPULARITY_RESPONSE => Self::PopularityResponse {
+                response: decode_payload(&mut decoder)?,
+            },
+            DELEGATED_INGEST_REPORT => Self::DelegatedIngestReport {
+                report: decode_payload(&mut decoder)?,
+            },
+            DELEGATED_INGEST_ACK => Self::DelegatedIngestAck {
+                acknowledgement: decode_payload(&mut decoder)?,
+            },
+            CANDIDATE_REGISTRATION => Self::CandidateRegistration {
+                registration: decode_payload(&mut decoder)?,
+            },
+            CANDIDATE_REGISTRATION_ACK => Self::CandidateRegistrationAck {
+                registration_hash: decoder.array()?,
+            },
             _ => return Err(ProtocolError::UnknownMessage(tag)),
         };
         if decoder.position != bytes.len() {
@@ -413,6 +420,11 @@ fn append_payload(bytes: &mut Vec<u8>, payload: &[u8]) -> Result<(), ProtocolErr
     bytes.extend_from_slice(&length.to_be_bytes());
     bytes.extend_from_slice(payload);
     Ok(())
+}
+
+fn decode_payload(decoder: &mut Decoder<'_>) -> Result<Vec<u8>, ProtocolError> {
+    let length = decoder.payload_length()?;
+    Ok(decoder.take(length)?.to_vec())
 }
 
 fn encode_contact(bytes: &mut Vec<u8>, contact: &RoutingContact) -> Result<(), ProtocolError> {
@@ -609,6 +621,12 @@ mod tests {
                 ApplicationMessage::DelegatedIngestAck {
                     acknowledgement: vec![0x33, 0x44],
                 },
+                ApplicationMessage::CandidateRegistration {
+                    registration: vec![0x55, 0x66, 0x77],
+                },
+                ApplicationMessage::CandidateRegistrationAck {
+                    registration_hash: [0x88; 32],
+                },
             ] {
                 assert_eq!(
                     ApplicationMessage::decode(&message.encode().expect("encode")).expect("decode"),
@@ -616,6 +634,7 @@ mod tests {
                 );
             }
         }
+
         let vote = ApplicationMessage::DirectVote {
             vote: vec![4, 5, 6],
         };
@@ -623,6 +642,14 @@ mod tests {
             ApplicationMessage::decode(&vote.encode().expect("encode")).expect("decode"),
             vote
         );
+    }
+
+    #[test]
+    fn candidate_registration_envelope_rejects_oversized_payloads() {
+        let message = ApplicationMessage::CandidateRegistration {
+            registration: vec![0; super::MAX_MESSAGE_SIZE + 1],
+        };
+        assert_eq!(message.encode(), Err(ProtocolError::MessageTooLarge));
     }
 
     #[test]
@@ -640,6 +667,26 @@ mod tests {
         assert_eq!(
             acknowledgement.encode().expect("encode acknowledgement"),
             b"POP\x01\x0b\x00\x00\x00\x02\x33\x44"
+        );
+    }
+
+    #[test]
+    fn candidate_registry_envelopes_match_golden_vectors() {
+        let registration = ApplicationMessage::CandidateRegistration {
+            registration: vec![0x55, 0x66],
+        };
+        assert_eq!(
+            registration.encode().expect("encode registration"),
+            b"POP\x01\x0c\x00\x00\x00\x02\x55\x66"
+        );
+        let acknowledgement = ApplicationMessage::CandidateRegistrationAck {
+            registration_hash: [0x88; 32],
+        };
+        let mut expected = b"POP\x01\x0d".to_vec();
+        expected.extend_from_slice(&[0x88; 32]);
+        assert_eq!(
+            acknowledgement.encode().expect("encode acknowledgement"),
+            expected
         );
     }
 

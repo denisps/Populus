@@ -398,6 +398,46 @@ impl IdentityManager {
         Ok(node_id(&identity))
     }
 
+    /// Activates a discovered identity only after its ownership certificate
+    /// has already passed the exact verifier-committee quorum checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IdentityManagerError::InsufficientObservations`] when local
+    /// discovery has not independently observed the identity, or
+    /// [`IdentityManagerError::ActiveNodeLimit`] when local capacity is full.
+    pub(crate) fn activate_certified_binding(
+        &mut self,
+        identity: NetworkIdentity,
+        now_ms: u64,
+    ) -> Result<NodeId, IdentityManagerError> {
+        self.expire(now_ms);
+        let already_active = self.identities.get(&identity).is_some_and(|state| {
+            matches!(
+                state.lifecycle,
+                IdentityLifecycle::Active | IdentityLifecycle::Suspect
+            )
+        });
+        if !self.identities.get(&identity).is_some_and(|state| {
+            matches!(
+                state.lifecycle,
+                IdentityLifecycle::Discovered
+                    | IdentityLifecycle::Active
+                    | IdentityLifecycle::Suspect
+            )
+        }) {
+            return Err(IdentityManagerError::InsufficientObservations);
+        }
+        if !already_active && self.active_count() >= self.config.max_active_nodes {
+            return Err(IdentityManagerError::ActiveNodeLimit);
+        }
+        self.identities
+            .get_mut(&identity)
+            .ok_or(IdentityManagerError::InsufficientObservations)?
+            .lifecycle = IdentityLifecycle::Active;
+        Ok(node_id(&identity))
+    }
+
     /// Test-only bypass for isolated unit and localhost fixtures.
     ///
     /// # Errors

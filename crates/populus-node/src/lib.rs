@@ -15,7 +15,8 @@ pub use identity::{
 
 pub use libp2p::{Multiaddr, PeerId};
 pub use persistence::{
-    FilePeerIdentityStore, PeerIdentityError, PeerIdentityStore, load_or_create_peer_identity,
+    FileOwnershipVoteJournal, FilePeerIdentityStore, PeerIdentityError, PeerIdentityStore,
+    load_or_create_peer_identity,
 };
 pub use populus_network::{RequestId, ResponseChannel, SendRequestError, SendResponseError};
 pub use populus_protocol::{

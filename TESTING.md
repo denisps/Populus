@@ -100,6 +100,13 @@ Identity simulations use the same `IdentityManager` transition logic as
 `populus-node`, advance supplied virtual timestamps without sleeping, and
 use seeded libp2p test keys. They cover distinct-observer thresholds,
 nonce correlation, IPv6 `/48` normalization, and evidence expiration.
+Cluster ownership unit tests additionally cover network-scoped bounded
+candidate shards, multiple `PeerId`s for one `NodeId`, deterministic
+committee transitions, exact-committee quorum votes, non-equivocation,
+certificate context, and incumbent lease retention. These are deterministic
+state-machine tests, not a distributed ownership simulation: partitions,
+message reordering, malicious membership snapshots, multi-node certificate
+exchange, candidate promotion, and authority recovery remain untested.
 
 ## Level 5: localhost network tests
 
@@ -121,6 +128,12 @@ automatic four-authority fanout, recovery, or replacement.
 Observer tests also exercise the runtime `PeerId`-to-verified-`NodeId` mapping:
 two transport identities mapped to one `NodeId` contribute only one
 observation, while distinct `NodeId`s satisfy the observation threshold.
+The candidate-registration localhost test uses separate `PopulusProcess`
+instances and the versioned request/ack protocol. It checks libp2p `PeerId`
+derivation against the candidate signing key and verifies that the receiving
+process authenticates the exact transport peer before indexing the signed
+registration. It does not exercise iterative DHT publication, shard queries,
+automatic reachability challenges, or distributed binding votes.
 
 ## Level 6: fuzzing
 

@@ -7,6 +7,7 @@ use populus_crypto::{
     verify_ed25519,
 };
 use populus_types::{AuthorityId, NetworkIdentity, NodeId};
+use sha2::{Digest, Sha256};
 
 const HEADER: &[u8; 4] = b"PIGM";
 const VERSION: u8 = 1;
@@ -202,6 +203,16 @@ impl GenesisManifest {
             return Err(GenesisManifestError::ManifestTooLarge);
         }
         Ok(bytes)
+    }
+
+    /// Returns the stable hash used as the epoch-zero committee-chain root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GenesisManifestError::ManifestTooLarge`] if canonical
+    /// encoding exceeds the manifest bound.
+    pub fn hash(&self) -> Result<[u8; 32], GenesisManifestError> {
+        Ok(Sha256::digest(self.canonical_bytes()?).into())
     }
 
     /// Decodes a bounded canonical v1 manifest. Signature verification remains explicit.

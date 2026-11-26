@@ -41,3 +41,13 @@ encoded = 504f50010a000000021122
 message = DelegatedIngestAck
 acknowledgement_payload = 3344
 encoded = 504f50010b000000023344
+
+# typed candidate-registration envelope with an opaque two-byte payload.
+message = CandidateRegistration
+registration_payload = 5566
+encoded = 504f50010c000000025566
+
+# typed candidate-registration acknowledgement containing a 32-byte hash.
+message = CandidateRegistrationAck
+registration_hash = 8888888888888888888888888888888888888888888888888888888888888888
+encoded = 504f50010d8888888888888888888888888888888888888888888888888888888888888888

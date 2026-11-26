@@ -4,6 +4,7 @@ mod control_loop;
 mod delegated_ingest;
 mod direct_ingest;
 mod genesis;
+mod ownership;
 
 use populus_crypto::{
     AuthorityKeypair, PublicKeyAlgorithm, authority_id, validate_ed25519_public_key, verify_ed25519,
@@ -31,6 +32,13 @@ pub use genesis::{GenesisManifest, GenesisManifestError, GenesisMember};
 pub use ingest_assignment::{
     ASSIGNMENT_VERSION, AssignmentAlgorithm, AssignmentError, DelegationDescriptor,
     INGEST_VIEW_COUNT, IngestAssignment, IngestNode, MATCH_BITS_MAX, select_match_bits,
+};
+pub use ownership::{
+    CandidateRegistration, CandidateRegistry, CommitteeSignature, CommitteeTransitionCertificate,
+    CommitteeTransitionVote, MemoryOwnershipVoteJournal, OwnershipBindingCertificate,
+    OwnershipBindingDecision, OwnershipBindingVote, OwnershipCommittee, OwnershipError,
+    OwnershipState, OwnershipVoteJournal, OwnershipVoteKey, OwnershipVoteKind,
+    ReachabilityAttestation, candidate_registry_key, candidate_registry_shard,
 };
 
 /// Number of authorities selected for a routing key.

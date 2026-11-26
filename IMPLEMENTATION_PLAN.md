@@ -2083,45 +2083,59 @@ Phase 11.5 is complete when:
 Current acceptance status:
 
 - **Fully implemented:** 1 (default startup without a manually supplied public
-  identity), 7 (multiple logical NodeIDs have separate local routing state),
-  18 (the current localhost integration and deterministic simulation tests pass;
-  this does not establish the deferred distributed scenarios).
+  identity), 7 (multiple logical NodeIDs have separate local routing state).
 - **Partially implemented:** 2 (bounded DHT contact discovery exists, but
-  authority discovery and durable bootstrap are absent); 3 (runtime observation
-  refresh exists, but identity lifecycle changes do not automatically complete
-  verification and activation); 4 (NodeID-deduplicated observation threshold
-  exists, without a network-wide signed verifier protocol); 5 (the state
-  machine requires authenticated direct reachability evidence from its caller,
-  but automatic challenge/dial-back is absent); 6 (local activation is
-  available through an explicit signed genesis manifest or local
-  verification, but not certified ownership arbitration); 12 (observations are
-  refreshed without restart, but verified binding replacement/retirement is
-  not automatic); 13 (custom DHT routing exists, authority membership
-  discovery does not); 15 (a localhost direct-vote and signed-popularity
-  adapter uses the existing direct-ingest state machine when authority
-  membership is explicitly installed); 17 (a localhost report/ACK path uses
-  the existing delegated sender/receiver state machines, but requires caller-
-  installed membership and contacts and lacks automatic fanout/recovery); 19 (identity/contact limits exist, but
-  network-wide and connection limits are not established); 20 (the architecture
-  records the decisions and limitations, while full lifecycle/test/operations
-  guidance remains incomplete).
-- **Deferred:** 8 (signed multi-candidate registration), 9 (distributed
-  incumbent/standby arbitration), 10 (candidate ranking and promotion), 11
-  (committee-bound conflict detection and safe resolution), 14 (five-process
-  DHT scenario), and 16 (authority replacement and state recovery).
+  authority discovery, iterative candidate-shard lookup, and durable bootstrap
+  are absent); 3 (runtime observations refresh continuously, but identity
+  changes do not automatically complete candidate renewal, verification, and
+  activation); 4 (observation counting deduplicates active NodeIDs and
+  deterministic committee selection exists, but there is no signed
+  network-wide verifier protocol or automatic eligibility snapshot); 5 (the
+  process can attest only to a directly connected matching PeerId and typed
+  reachability evidence exists, but challenge/dial-back is not automated); 6
+  (explicit signed genesis works and certificate-gated local activation exists
+  as an API, but distributed certificate exchange and post-genesis recovery
+  are absent); 8 (signed, expiring, sequence-checked candidate registrations
+  have bounded network-scoped shards and request/ack wire messages, but
+  publication is caller-driven and registry data is not persisted or queried
+  through the DHT); 9 (the local ownership state machine protects a healthy
+  incumbent, but votes/certificates are not exchanged or collected over the
+  network); 11 (committee/epoch/generation-bound decisions, chained transition
+  certificates, and a durable-before-signing journal exist, but competing
+  network certificates cannot yet be discovered and resolved); 12 (observation
+  refresh runs without restart and a certificate API can activate/retire a
+  binding, but identity changes do not automatically drive that lifecycle);
+  13 (custom DHT routing and candidate publication to known contacts exist,
+  but authority membership discovery and replication do not); 15 (the
+  localhost direct-vote and signed-popularity adapters use the existing
+  direct-ingest state machine when membership is explicitly installed); 17 (a
+  localhost report/ACK path uses the existing delegated sender/receiver state
+  machines, but caller-installed membership, automatic fanout/retry, and
+  durable recovery remain absent); 18 (existing localhost and deterministic
+  simulation tests pass, but the required five-process and ownership/failover
+  scenarios are not implemented); 19 (identity, candidate, and local contact
+  limits exist, but network-wide and connection limits are not established);
+  20 (architecture, testing, and this plan document current decisions and
+  limitations, while operations and full lifecycle guidance remain incomplete).
+- **Deferred:** 10 (independently verified candidate ranking and deterministic
+  standby promotion), 14 (five-process DHT scenario), and 16 (authority
+  replacement and state recovery).
 
-Phase 11.5 is not complete. In particular, committee-chain certificates,
-durable anti-equivocation, candidate registry/sharding, automatic verifier
-selection and renewal, authority membership/state replication, automated
-delegated-ingest fanout/retry and recovery, and five-process failure/recovery
-simulation are not implemented. A trusted signed genesis manifest is loaded
-and gates local genesis activation, but its network identifier is not compared
-against a separately configured runtime network identifier, and it does not
-provide safe post-genesis membership transitions. Delegated-ingest networking
-exists only as an explicitly installed request/response path; its membership
-discovery, automatic four-authority fanout/retry, and durable recovery remain
-unresolved. Passing local tests is not evidence that missing mechanisms are
-present or secure.
+Phase 11.5 is not complete. The ownership types and local state machines now
+implement deterministic committee selection/transitions, signed candidate
+records, binding certificates, healthy-incumbent retention, and durable
+non-equivocation when the file-backed identity store is used. They are not yet
+integrated into an automatic distributed election: ownership votes,
+certificates, and committee transitions lack wire messages and network
+collection; committee eligibility is caller-supplied; candidate records are
+not durably recovered; and local ownership state is not restored after
+restart. There is no independent runtime network-ID setting, no automated
+identity-change activation/revalidation loop, no authority membership/state
+replication or failover, and no Phase 11.5 five-process or adversarial
+simulation. Delegated-ingest membership discovery, automatic four-authority
+fanout/retry, and durable recovery also remain unresolved. The local tests
+exercise protocol components and a localhost candidate-registration
+request/ack, not distributed ownership safety.
 
 The identity-verification and arbitration assumptions must be stated
 explicitly. Passing a local test does not establish that the protocol
