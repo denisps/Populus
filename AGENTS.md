@@ -66,6 +66,63 @@ confirm setup completed successfully before running tests, coverage, or gates.
 6. Run `cargo xtask metrics` for hot-path, dependency, or binary changes, as
    required by `CONTRIBUTING.md`.
 
+## Workflow efficiency
+
+Don't call 'cargo fmt --all' or other automatic formating tools too often. This tool is important before commiting your code, but if you are still making changes and fixing thing, it changes the code under you and it is not longer how you remember it, and it makes it hard for you to do prescise edits, and causing your edit toolcalls to fail.
+
+## Human-Oriented Technical Documentation
+
+Technical documentation must be optimized for human comprehension, not maximum information density or minimum token count. Preserve technical precision while minimizing the cognitive effort required to understand the system.
+
+### Writing principles
+
+- Prefer clear, natural sentences over compressed technical language.
+- Limit the number of distinct concepts introduced in a single sentence or paragraph.
+- Prefer active voice. Explicitly identify the actor, its action, the affected entity, and the conditions under which the action occurs.
+- Avoid excessive nominalization, stacked technical modifiers, and unnecessarily abstract phrasing.
+- Use established technical terminology consistently. Do not invent new terminology merely to shorten an explanation.
+- Define unfamiliar terms before relying on them.
+- Do not assume that the reader has the entire architecture in their working memory.
+- Use additional sentences when they improve comprehension, but avoid redundant explanations and unnecessary filler.
+
+### Explaining complex systems
+
+When introducing a nontrivial mechanism, explain the following in a natural order:
+
+1. **Purpose:** What problem does it solve?
+2. **Context:** Under what circumstances does the problem arise?
+3. **Mechanism:** Who does what, when, and how?
+4. **Rationale:** Why does this approach solve or mitigate the problem?
+5. **Limitations:** What assumptions, trade-offs, and failure conditions remain?
+
+Use concrete examples, sequential descriptions, and diagrams where they materially improve understanding.
+
+Introduce concepts incrementally. Explain normal operation before discussing exceptional conditions, security considerations, and optimizations.
+
+### Precision and readability
+
+Do not simplify documentation by removing important technical details, weakening requirements, or concealing unresolved problems.
+
+Separate explanatory prose from normative protocol requirements where appropriate. Explanatory prose should establish an intuitive understanding of the mechanism, while normative requirements should specify its exact behavior.
+
+Use mathematical notation, tables, pseudocode, and formal definitions when they communicate the intended meaning more clearly than prose.
+
+### Documentation review
+
+Before finalizing documentation, review newly written or substantially modified sections from the perspective of a technically competent human who is familiar with the project but has not participated in the current implementation.
+
+Check whether the reader can understand:
+
+- What the mechanism does.
+- Why it exists.
+- How its components interact.
+- What assumptions it depends on.
+- What happens when those assumptions fail.
+
+Rewrite passages that require repeated reading or mentally unpacking several interconnected abstractions.
+
+Apply these principles to architecture documents, implementation plans, design proposals, audit reports, decision records, and pull request descriptions.
+
 ## Completion report
 
 For meaningful code changes, report what changed, the behavior or invariant,
