@@ -470,6 +470,547 @@ silently discarded or buffered without a limit.
 Transport peer identity remains `PeerId`; routing contacts remain
 scarce-network-derived `NodeId`.
 
+
+## 5.1 Process identity versus logical DHT identity
+
+A Populus process is not equivalent to a single DHT NodeId.
+
+Each process has one persistent cryptographic libp2p PeerId and
+may operate multiple logical DHT nodes.
+
+Conceptually:
+
+```text
+PopulusProcess
+    |
+    +-- Persistent PeerId
+    |
+    +-- Shared libp2p transport
+    |
+    +-- IdentityManager
+          |
+          +-- NetworkIdentity A -> NodeId A
+          |
+          +-- NetworkIdentity B -> NodeId B
+          |
+          +-- NetworkIdentity C -> NodeId C
+```
+
+The process's PeerId authenticates its network connections.
+
+Each NodeId identifies a scarce network resource and determines
+a position in the Populus XOR DHT.
+
+The binding between them is dynamic.
+
+A process may gain or lose NodeIds without changing its PeerId.
+
+Each active logical node maintains separate:
+
+- DHT routing state
+- Authority responsibilities
+- Delegated-ingest responsibilities
+- Identity lifecycle and verification state
+
+Transport connections and other expensive infrastructure should
+be shared where practical.
+
+Use asynchronous tasks/state machines rather than a dedicated
+operating-system thread for each logical NodeId.
+
+The maximum number of active logical nodes per process is
+configurable, initially defaulting to four.
+
+Multiple public addresses that normalize to the same
+NetworkIdentity produce only one logical NodeId.
+
+---
+
+## 5.2 Bootstrap without a public identity
+
+Populus processes must be able to start without knowing their
+public IP address or having an active NodeId.
+
+Bootstrap peers may be obtained from:
+
+- Configured Multiaddrs
+- DNS-based bootstrap records
+- Persisted peer contacts
+- Optional local-network discovery
+
+Bootstrap peers are discovery entry points, not inherently
+trusted authorities.
+
+The process initially operates as an authenticated libp2p peer.
+
+It exchanges peer contacts, discovers DHT neighborhoods, and
+collects externally observed address information.
+
+After verification, it activates one or more logical NodeIds
+and joins the Populus DHT under those identities.
+
+Bootstrap continues as needed after initial startup.
+
+An isolated node with no known peers requires explicit genesis
+or test-network configuration. It cannot discover the existing
+network without an initial communication path.
+
+---
+
+## 5.3 Continuous public identity discovery
+
+Public identity discovery is part of the Populus protocol.
+
+A peer may request its externally observed connection address
+by setting an optional flag on supported protocol requests:
+
+```text
+REQUEST_OBSERVED_ADDRESS
+```
+
+A responding peer reports the requester's observed remote
+connection endpoint.
+
+Conceptual response:
+
+```text
+ObservedAddress {
+    observed_endpoint
+    request_nonce
+}
+```
+
+The response is associated with the authenticated libp2p PeerId
+of the responder.
+
+The nonce binds the observation to a fresh request and prevents
+an old response from satisfying a new observation request.
+
+An observation is evidence of the address visible to one peer,
+not proof of ownership or inbound reachability.
+
+Observations obtained through relays or other indirect paths
+must be identified and must not be mistaken for direct public
+source-address observations.
+
+Identity discovery is continuous and can be triggered by:
+
+- Startup
+- New peer connections
+- New local interfaces
+- Changes to local addresses
+- Changes to NAT mappings
+- Conflicting remote observations
+- Periodic identity renewal
+
+Discovery results are normalized using the existing
+NetworkIdentity policy in section 2.2.
+
+---
+
+## 5.4 Observation agreement
+
+A new public identity becomes eligible for verification after
+at least three independent authenticated peers report the same
+normalized NetworkIdentity.
+
+For IPv4:
+
+```text
+Three peers observe the same public IPv4
+    |
+    v
+Candidate IPv4 NetworkIdentity
+```
+
+For IPv6:
+
+```text
+Three peers observe addresses in the same eligible /48
+    |
+    v
+Candidate IPv6 NetworkIdentity
+```
+
+Multiple observations from one PeerId count as one observer.
+
+Prefer observations from distinct verified NodeIds and diverse
+network identities where possible.
+
+Agreement does not imply that the observers are honest or
+independently operated.
+
+Observation records must expire.
+
+Conflicting reports should be handled using bounded history
+and hysteresis, not by immediately changing active identities.
+
+Three agreeing observations transition an identity into the
+verification process, never directly into Active.
+
+---
+
+## 5.5 Public identity verification
+
+For a candidate NetworkIdentity:
+
+1. Derive its NodeId.
+2. Discover the nearest already-active eligible Populus DHT nodes.
+3. Select an appropriate set of independent verifiers.
+4. Request fresh direct reachability challenges.
+5. Verify the candidate responds at the claimed network endpoint.
+6. Authenticate the responding libp2p PeerId.
+7. Verify consistency between the claimed NetworkIdentity,
+   the observed network path, and the applicable scarcity policy.
+8. Collect signed, time-limited verification evidence.
+9. Proceed to NodeID ownership arbitration.
+
+The verifier set is derived deterministically from the
+candidate NodeId's DHT neighborhood, excluding the claimant.
+
+The initial target is three independent successful confirmations.
+
+The precise verifier quorum and membership rules must be tested
+for overlap, partitions, and malicious verifiers before being
+treated as security guarantees.
+
+Verification must distinguish:
+
+```text
+Address observation
+    !=
+Inbound reachability
+    !=
+Authenticated PeerId
+    !=
+Exclusive network-resource ownership
+    !=
+Active NodeID binding
+```
+
+In particular:
+
+- Successful dial-back verifies a reachable endpoint.
+- A NAT-forwarded endpoint does not prove exclusive control
+  of the public IPv4 address.
+- An IPv6 endpoint does not prove exclusive ownership of
+  the entire normalized /48 prefix.
+- A signed statement alone cannot prove address ownership.
+- Relay reachability is not equivalent to direct reachability.
+
+Use existing libp2p Identify/AutoNAT mechanisms where
+appropriate, while keeping Populus-specific scarcity
+verification and arbitration separate.
+
+Verification evidence is signed, versioned, and time-limited.
+
+It must bind the claimed NodeId, candidate PeerId, verifier,
+challenge, and verification epoch/expiration.
+
+An expired verification cannot independently authorize
+continued authority participation.
+
+---
+
+## 5.6 NodeID candidate registry
+
+A NodeId represents one normalized scarce network identity,
+but multiple PeerIds may compete to operate it.
+
+Example:
+
+```text
+NodeId X
+    |
+    +-- PeerId A: Active
+    +-- PeerId B: Verified standby
+    +-- PeerId C: Verified standby
+    +-- PeerId D: Candidate
+    +-- PeerId E: Candidate
+```
+
+This is expected on shared public IPv4 networks, including
+households, campuses, corporate networks, and CGNAT systems.
+
+Candidates are not considered malicious merely because they
+claim an already occupied NodeId.
+
+However, candidate registration does not confer active
+DHT membership.
+
+Populus uses its existing custom DHT for candidate discovery.
+
+No separate libp2p Kademlia overlay is introduced.
+
+Conceptual registry key:
+
+```text
+CandidateRegistryKey =
+    H("populus/node-candidates/v1" || NodeId)
+```
+
+Each candidate advertises a signed, expiring registration:
+
+```text
+NodeId
+PeerId
+reachable Multiaddrs
+registration sequence
+expiration
+verification references
+```
+
+The registry is a discovery index, not an ownership authority.
+
+Candidate records may be distributed across deterministic
+shards derived from the candidate PeerId.
+
+For example:
+
+```text
+CandidateShard =
+    prefix(H(PeerId), shard_bits)
+
+ShardKey =
+    H("populus/node-candidates/shard/v1" ||
+      NodeId || CandidateShard)
+```
+
+The exact sharding and indexing algorithm must support
+incremental discovery without requiring the four nearest nodes
+to store or return every registered PeerId.
+
+Registry state must be bounded and expiring.
+
+The nearest nodes may maintain:
+
+- Active binding
+- Small verified standby set
+- Bounded candidate index
+- Registry shard metadata
+
+Large candidate populations must not cause unbounded
+memory, connection, or verification requirements.
+
+---
+
+## 5.7 Candidate persistence and selection
+
+Candidate selection prioritizes demonstrated reliability.
+
+A healthy active incumbent retains its NodeId even when
+new candidates register.
+
+Verified standbys are ranked using independently observed
+persistence and reachability history.
+
+Conceptual priority:
+
+```text
+Healthy incumbent
+    >
+Verified persistent standby
+    >
+Recently verified standby
+    >
+Unverified candidate
+```
+
+This is not a numerical formula and does not override
+current verification requirements.
+
+Candidate ranking must not depend on:
+
+- Self-reported uptime
+- Number of open ports
+- Number of repeated registrations
+- Number of generated PeerIds
+
+Persistence is evidence of operational reliability,
+not proof of honesty.
+
+Candidate ranking may be periodically updated, initially
+on a daily basis.
+
+The active incumbent should not rotate merely because
+a standby's score improves slightly.
+
+An incumbent remains Active while it satisfies the
+current lease, reachability, and protocol requirements.
+
+---
+
+## 5.8 Active NodeID binding and arbitration
+
+Only one PeerId should represent a NodeId in a converged
+Populus DHT membership view.
+
+The active binding is distinct from a candidate registration.
+
+Conceptual binding:
+
+```text
+ActiveNodeBinding {
+    NodeId
+    PeerId
+    generation
+    verification_epoch
+    expiration
+    verifier_approvals
+}
+```
+
+The binding is supported by signed verification and arbitration
+evidence from the appropriate DHT neighborhood.
+
+It is not established merely because a candidate announces it.
+
+The neighboring nodes coordinate active-owner selection.
+
+An incumbent may be replaced when:
+
+- It voluntarily resigns.
+- It loses required reachability.
+- Its binding expires without valid renewal.
+- Sufficient independently verified protocol evidence
+  establishes that it is no longer eligible.
+
+A new candidate cannot displace a healthy incumbent merely
+by registering or obtaining a higher persistence score.
+
+If the incumbent becomes unavailable, the best eligible
+standby is considered for promotion.
+
+The promotion must create a new, versioned binding.
+
+Concurrent proposals and conflicting generations require
+explicit conflict handling.
+
+A generation number by itself does not guarantee that
+two network partitions cannot elect different active owners.
+
+Likewise, the Phase 7 rule allowing a replacement authority
+to recover from two matching snapshots does not automatically
+establish a safe NodeID ownership-election protocol.
+
+Ownership arbitration needs its own quorum and freshness
+rules, including verifier-set changes.
+
+If conflicting active bindings cannot safely be resolved,
+the system must preserve an explicit unresolved state instead
+of silently choosing one.
+
+The protocol aims for eventual convergence on a single
+active owner under its documented network and Byzantine
+assumptions.
+
+It does not claim unconditional global uniqueness during
+arbitrary partitions.
+
+---
+
+## 5.9 Identity lifecycle and dynamic changes
+
+Each local NetworkIdentity follows:
+
+```text
+Unknown
+    |
+    v
+Discovered
+    |
+    v
+Verifying
+    |
+    v
+Active
+    |
+    +---> Suspect
+    |        |
+    |        +---> Active
+    |        |
+    |        +---> Retiring
+    |
+    +---> Retiring
+             |
+             v
+           Removed
+```
+
+The process continuously monitors:
+
+- Public address changes
+- Interface changes
+- Reachability
+- Verification expiration
+- Active binding expiration
+- Competing candidates
+- DHT neighborhood changes
+
+A newly discovered identity may become Active without
+restarting the process.
+
+A stale identity must eventually retire.
+
+Temporary reachability loss must not cause immediate
+uncontrolled identity churn.
+
+When an identity retires:
+
+1. Stop advertising new authority responsibilities.
+2. Notify relevant peers where possible.
+3. Hand off recoverable state where supported.
+4. Release its logical DHT responsibilities.
+5. Preserve unaffected identities in the same process.
+
+The process's persistent PeerId remains unchanged.
+
+If its public IP changes, the new NetworkIdentity produces
+a new NodeId according to the existing hash rules.
+
+The old NodeId must not be retained indefinitely merely
+because the process still holds the same PeerId.
+
+---
+
+## 5.10 Security and availability limitations
+
+The scarcity identity model is an economic and operational
+Sybil-resistance mechanism, not proof of one human per IP.
+
+Known limitations:
+
+- Many users may share one public IPv4.
+- IPv6 prefix allocation sizes differ across networks.
+- One operator may control many public addresses.
+- VPN and cloud providers may offer inexpensive identities.
+- A shared IP may have multiple independently reachable peers.
+- Reachability does not establish exclusive resource ownership.
+- Verifiers can collude.
+- Nearby DHT nodes may be eclipsed or temporarily partitioned.
+
+Candidate persistence improves operational stability but
+does not prove honesty.
+
+Peer observation agreement improves confidence but does
+not replace active verification.
+
+Signed verification evidence authenticates statements
+but does not guarantee that the statement is true.
+
+Verifier quorum rules, active-binding arbitration,
+candidate-registry capacity, and eclipse resistance must
+be tested before the relevant protocol behavior is frozen.
+
+Phase 11.5 implements the operational mechanisms and
+deterministic/localhost tests.
+
+Phase 16 performs adversarial protocol hardening.
+
+Phase 17 validates the mechanisms using actual Linux
+network namespaces, NAT, multihoming, and kernel-level
+network failures.
+
 ---
 
 # 6. Populus XOR DHT
