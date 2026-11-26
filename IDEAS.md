@@ -87,3 +87,7 @@
   not a descriptor generation. Specify how pending reports from removed or
   reshuffled candidates are drained, accepted, or rejected across restart, and
   test duplicate clients across the transition.
+- Persist the delegation controller's bounded rate history and last-change
+  time in replicated authority state before wiring it into live transitions.
+  Authority replacement or restart must not reset smoothing and dwell in a
+  way that causes different members to publish conflicting configurations.
