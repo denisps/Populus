@@ -25,8 +25,6 @@ pub struct IdentityManagerConfig {
     pub observation_quorum: usize,
     /// Independent direct verifiers required before activation.
     pub verification_quorum: usize,
-    /// Permit explicit local genesis activation for isolated test networks.
-    pub genesis_mode: bool,
 }
 
 impl Default for IdentityManagerConfig {
@@ -37,7 +35,6 @@ impl Default for IdentityManagerConfig {
             verification_ttl_ms: DEFAULT_VERIFICATION_TTL_MS,
             observation_quorum: 3,
             verification_quorum: 3,
-            genesis_mode: false,
         }
     }
 }
@@ -126,7 +123,7 @@ struct Challenge {
 #[derive(Debug)]
 struct ManagedIdentity {
     lifecycle: IdentityLifecycle,
-    observers: HashMap<PeerId, Observation>,
+    observers: HashMap<NodeId, Observation>,
     challenges: HashMap<NodeId, Challenge>,
     verifications: HashMap<NodeId, Verification>,
 }
@@ -139,7 +136,7 @@ pub struct IdentityManager {
 }
 
 impl IdentityManager {
-    /// Creates an identity manager for one persistent transport peer.
+    /// Creates an identity manager for one process.
     ///
     /// # Errors
     ///
@@ -167,10 +164,12 @@ impl IdentityManager {
         })
     }
 
-    /// Adds an authenticated direct observation, correlated to the outstanding nonce.
+    /// Adds a direct observation from an already verified active `NodeId`,
+    /// correlated to the outstanding nonce.
     ///
-    /// Repeated observations from one `PeerId` count once, even if it reports
-    /// several ports or multiple addresses in the same normalized IPv6 `/48`.
+    /// Repeated observations from one `NodeId` count once. The caller must
+    /// establish that this observer's current active binding is valid; this
+    /// method deliberately does not infer that a `PeerId` is a `NodeId`.
     ///
     /// # Errors
     ///
@@ -178,7 +177,7 @@ impl IdentityManager {
     /// or exhausted bounds.
     pub fn observe(
         &mut self,
-        observer: PeerId,
+        observer: NodeId,
         expected_nonce: [u8; 16],
         response_nonce: [u8; 16],
         endpoint: SocketAddr,
@@ -279,8 +278,8 @@ impl IdentityManager {
 
     /// Records a successful, authenticated direct dial-back response.
     ///
-    /// The caller must derive `verifier` from an already eligible DHT contact
-    /// and must only call this after the libp2p-authenticated challenge response
+    /// The caller must derive `verifier` from an already eligible active DHT
+    /// contact and must only call this after the libp2p-authenticated response
     /// matches `local_peer_id`, the normalized identity, and the fresh nonce.
     ///
     /// # Errors
@@ -366,22 +365,51 @@ impl IdentityManager {
         Ok(node_id(&identity))
     }
 
-    /// Activates one identity under an explicitly enabled isolated genesis policy.
+    /// Activates a manifest identity after the genesis observation quorum is met.
     ///
-    /// This bypasses observation and verifier quorums and must only be enabled
-    /// for a deliberately configured test/genesis network.
+    /// This is crate-private so only the signed-manifest runtime adapter can
+    /// authorize the genesis transition.
+    pub(crate) fn activate_manifest_member(
+        &mut self,
+        identity: NetworkIdentity,
+        now_ms: u64,
+    ) -> Result<NodeId, IdentityManagerError> {
+        self.expire(now_ms);
+        let already_active = self.identities.get(&identity).is_some_and(|state| {
+            matches!(
+                state.lifecycle,
+                IdentityLifecycle::Active | IdentityLifecycle::Suspect
+            )
+        });
+        if self
+            .identities
+            .get(&identity)
+            .is_none_or(|state| state.lifecycle != IdentityLifecycle::Discovered)
+        {
+            return Err(IdentityManagerError::InsufficientObservations);
+        }
+        if !already_active && self.active_count() >= self.config.max_active_nodes {
+            return Err(IdentityManagerError::ActiveNodeLimit);
+        }
+        self.identities
+            .get_mut(&identity)
+            .ok_or(IdentityManagerError::InsufficientObservations)?
+            .lifecycle = IdentityLifecycle::Active;
+        Ok(node_id(&identity))
+    }
+
+    /// Test-only bypass for isolated unit and localhost fixtures.
     ///
     /// # Errors
     ///
-    /// Returns [`IdentityManagerError::InvalidConfiguration`] unless genesis
-    /// mode is enabled, or [`IdentityManagerError::ActiveNodeLimit`] at capacity.
+    /// Returns [`IdentityManagerError::ActiveNodeLimit`] when local capacity is
+    /// exhausted, or [`IdentityManagerError::ResourceLimit`] when tracking is
+    /// full.
+    #[cfg(test)]
     pub fn activate_genesis(
         &mut self,
         identity: NetworkIdentity,
     ) -> Result<NodeId, IdentityManagerError> {
-        if !self.config.genesis_mode {
-            return Err(IdentityManagerError::InvalidConfiguration);
-        }
         if !self.identities.contains_key(&identity)
             && self.identities.len() >= MAX_TRACKED_IDENTITIES
         {
@@ -570,10 +598,8 @@ impl IdentityManager {
 /// A bounded record of authenticated, time-limited observations.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ObservationEvidence {
-    /// Authenticated observer `PeerId`.
-    pub observer: PeerId,
-    /// Observer's already-verified network identity, if known.
-    pub observer_identity: Option<NetworkIdentity>,
+    /// Already-verified active Populus `NodeId` of the observer.
+    pub observer_node_id: NodeId,
     /// Address seen on the direct connection.
     pub endpoint: SocketAddr,
     /// Expiration of this evidence.
@@ -582,21 +608,19 @@ pub struct ObservationEvidence {
 
 impl std::fmt::Debug for ObservationEvidence {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let observer_identity = self
-            .observer_identity
-            .as_ref()
-            .map(|identity| identity.as_bytes().to_vec());
         formatter
             .debug_struct("ObservationEvidence")
-            .field("observer", &self.observer)
-            .field("observer_identity", &observer_identity)
+            .field("observer_node_id", &self.observer_node_id)
             .field("endpoint", &self.endpoint)
             .field("expires_at_ms", &self.expires_at_ms)
             .finish()
     }
 }
 
-/// Verifies that an observation set has the required distinct authenticated observers.
+/// Verifies that an observation set has the required distinct active `NodeId`s.
+///
+/// This only deduplicates protocol identities; it does not establish distinct
+/// physical operators or any other real-world independence property.
 #[must_use]
 pub fn has_independent_observers(
     evidence: &[ObservationEvidence],
@@ -610,7 +634,7 @@ pub fn has_independent_observers(
             item.expires_at_ms > now_ms
                 && NetworkIdentity::from_ip(item.endpoint.ip()).ok() == Some(identity)
         })
-        .map(|item| item.observer)
+        .map(|item| item.observer_node_id)
         .collect::<HashSet<_>>();
     distinct.len() >= required
 }
@@ -624,10 +648,62 @@ mod tests {
     use libp2p::identity::Keypair;
     use populus_types::{NetworkIdentity, NodeId};
 
-    use super::{IdentityLifecycle, IdentityManager, IdentityManagerConfig, IdentityManagerError};
+    use super::{
+        IdentityLifecycle, IdentityManager, IdentityManagerConfig, IdentityManagerError,
+        ObservationEvidence, has_independent_observers,
+    };
 
     fn peer() -> libp2p::PeerId {
         Keypair::generate_ed25519().public().to_peer_id()
+    }
+
+    fn observer(byte: u8) -> NodeId {
+        NodeId::from_bytes([byte; 32])
+    }
+
+    #[test]
+    fn observation_quorum_counts_node_ids_not_connections_or_physical_operators() {
+        let network_identity = identity("8.8.8.8");
+        let evidence = [
+            ObservationEvidence {
+                observer_node_id: observer(1),
+                endpoint: endpoint("8.8.8.8"),
+                expires_at_ms: 100,
+            },
+            ObservationEvidence {
+                observer_node_id: observer(1),
+                endpoint: endpoint("8.8.8.8"),
+                expires_at_ms: 100,
+            },
+            ObservationEvidence {
+                observer_node_id: observer(2),
+                endpoint: endpoint("8.8.8.8"),
+                expires_at_ms: 100,
+            },
+            ObservationEvidence {
+                observer_node_id: observer(3),
+                endpoint: endpoint("8.8.8.8"),
+                expires_at_ms: 100,
+            },
+        ];
+        assert!(has_independent_observers(
+            &evidence,
+            network_identity,
+            50,
+            3
+        ));
+        assert!(!has_independent_observers(
+            &evidence[..3],
+            network_identity,
+            50,
+            3
+        ));
+        assert!(!has_independent_observers(
+            &evidence,
+            network_identity,
+            100,
+            3
+        ));
     }
 
     fn identity(ip: &str) -> NetworkIdentity {
@@ -639,14 +715,14 @@ mod tests {
     }
 
     #[test]
-    fn three_distinct_nonces_and_peers_promote_discovery() {
+    fn three_distinct_active_node_ids_promote_discovery() {
         let mut manager =
             IdentityManager::new(peer(), IdentityManagerConfig::default()).expect("manager");
         let identity = identity("8.8.8.8");
         for index in 0..3 {
             let result = manager
                 .observe(
-                    peer(),
+                    observer(index + 1),
                     [index; 16],
                     [index; 16],
                     endpoint("8.8.8.8"),
@@ -670,10 +746,10 @@ mod tests {
     fn duplicate_observer_and_stale_or_relayed_observations_do_not_count() {
         let mut manager =
             IdentityManager::new(peer(), IdentityManagerConfig::default()).expect("manager");
-        let observer = peer();
+        let same_observer = observer(1);
         for index in 0..3 {
             let result = manager.observe(
-                observer,
+                same_observer,
                 [index; 16],
                 [index; 16],
                 endpoint("8.8.8.8"),
@@ -687,11 +763,11 @@ mod tests {
             IdentityLifecycle::Unknown
         );
         assert_eq!(
-            manager.observe(peer(), [1; 16], [2; 16], endpoint("8.8.8.8"), true, 4,),
+            manager.observe(observer(2), [1; 16], [2; 16], endpoint("8.8.8.8"), true, 4,),
             Err(IdentityManagerError::NonceMismatch)
         );
         assert_eq!(
-            manager.observe(peer(), [1; 16], [1; 16], endpoint("8.8.8.8"), false, 4,),
+            manager.observe(observer(2), [1; 16], [1; 16], endpoint("8.8.8.8"), false, 4,),
             Err(IdentityManagerError::IndirectObservation)
         );
     }
@@ -706,7 +782,7 @@ mod tests {
         {
             manager
                 .observe(
-                    peer(),
+                    observer(u8::try_from(index + 1).expect("three observers")),
                     [index as u8; 16],
                     [index as u8; 16],
                     endpoint(ip),
@@ -730,9 +806,16 @@ mod tests {
         };
         let mut manager = IdentityManager::new(local_peer, config).expect("manager");
         let network_identity = identity("8.8.8.8");
-        for _ in 0..3 {
+        for index in 1..=3 {
             manager
-                .observe(peer(), [1; 16], [1; 16], endpoint("8.8.8.8"), true, 1)
+                .observe(
+                    observer(index),
+                    [index; 16],
+                    [index; 16],
+                    endpoint("8.8.8.8"),
+                    true,
+                    1,
+                )
                 .expect("observation");
         }
         for verifier_number in 1..=3 {
@@ -771,9 +854,16 @@ mod tests {
         let mut manager =
             IdentityManager::new(local_peer, IdentityManagerConfig::default()).expect("manager");
         let network_identity = identity("8.8.8.8");
-        for _ in 0..3 {
+        for index in 1..=3 {
             manager
-                .observe(peer(), [2; 16], [2; 16], endpoint("8.8.8.8"), true, 1)
+                .observe(
+                    observer(index),
+                    [index; 16],
+                    [index; 16],
+                    endpoint("8.8.8.8"),
+                    true,
+                    1,
+                )
                 .expect("observation");
         }
         for byte in 1..=3 {
@@ -809,9 +899,16 @@ mod tests {
         let mut manager =
             IdentityManager::new(local_peer, IdentityManagerConfig::default()).expect("manager");
         let network_identity = identity("8.8.8.8");
-        for _ in 0..3 {
+        for index in 1..=3 {
             manager
-                .observe(peer(), [3; 16], [3; 16], endpoint("8.8.8.8"), true, 1)
+                .observe(
+                    observer(index),
+                    [index; 16],
+                    [index; 16],
+                    endpoint("8.8.8.8"),
+                    true,
+                    1,
+                )
                 .expect("observation");
         }
         let verifier = NodeId::from_bytes([4; 32]);
@@ -845,7 +942,7 @@ mod tests {
         for index in 0..3 {
             manager
                 .observe(
-                    peer(),
+                    observer(index + 1),
                     [index; 16],
                     [index; 16],
                     endpoint("8.8.8.8"),
@@ -887,22 +984,10 @@ mod tests {
     }
 
     #[test]
-    fn genesis_activation_requires_explicit_test_network_configuration() {
+    fn test_only_genesis_activation_bypasses_verification() {
         let identity = identity("8.8.8.8");
-        let mut production =
+        let mut test_network =
             IdentityManager::new(peer(), IdentityManagerConfig::default()).expect("manager");
-        assert_eq!(
-            production.activate_genesis(identity),
-            Err(IdentityManagerError::InvalidConfiguration)
-        );
-        let mut test_network = IdentityManager::new(
-            peer(),
-            IdentityManagerConfig {
-                genesis_mode: true,
-                ..IdentityManagerConfig::default()
-            },
-        )
-        .expect("genesis manager");
         assert_eq!(
             test_network.activate_genesis(identity),
             Ok(populus_crypto::node_id(&identity))

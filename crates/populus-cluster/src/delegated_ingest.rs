@@ -199,6 +199,18 @@ impl SignedIngestReportAck {
         self.signer
     }
 
+    /// Returns the content, daily epoch, and assignment view acknowledged.
+    #[must_use]
+    pub const fn scope(&self) -> (ContentId, UtcDay, u8) {
+        (self.content_id, self.day, self.view)
+    }
+
+    /// Returns the ingest node identity bound to the acknowledged report.
+    #[must_use]
+    pub const fn node_id(&self) -> NodeId {
+        self.node_id
+    }
+
     /// Returns the acknowledged report sequence.
     #[must_use]
     pub const fn report_sequence(&self) -> u64 {
@@ -336,6 +348,18 @@ impl DelegatedIngestState {
             active: ClientSketch::new(),
             pending: None,
         })
+    }
+
+    /// Returns the content, daily epoch, and assignment view for this sender.
+    #[must_use]
+    pub const fn scope(&self) -> (ContentId, UtcDay, u8) {
+        (self.content_id, self.day, self.view)
+    }
+
+    /// Returns the identity of the ingest node producing reports.
+    #[must_use]
+    pub const fn node_id(&self) -> NodeId {
+        self.node_id
     }
 
     /// Adds a client to the active sketch; collection continues while a report is pending.

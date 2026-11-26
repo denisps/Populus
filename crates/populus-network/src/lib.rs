@@ -3,7 +3,7 @@
 #![allow(unreachable_code)]
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io,
     time::Duration,
 };
@@ -286,6 +286,8 @@ pub enum TransportEvent {
 pub struct Transport {
     swarm: Swarm<Behaviour>,
     remote_addresses: HashMap<libp2p::PeerId, Vec<Multiaddr>>,
+    connected_peers: HashSet<libp2p::PeerId>,
+    direct_connection_counts: HashMap<libp2p::PeerId, u32>,
     active_requests: HashMap<request_response::OutboundRequestId, RequestId>,
     queued_requests: VecDeque<PendingRequest>,
     failed_requests: VecDeque<(libp2p::PeerId, RequestId)>,
@@ -313,6 +315,8 @@ impl Transport {
         Ok(Self {
             swarm: build_swarm(identity)?,
             remote_addresses: HashMap::new(),
+            connected_peers: HashSet::new(),
+            direct_connection_counts: HashMap::new(),
             active_requests: HashMap::new(),
             queued_requests: VecDeque::new(),
             failed_requests: VecDeque::new(),
@@ -330,6 +334,16 @@ impl Transport {
     #[must_use]
     pub fn remote_addresses(&self, peer: &libp2p::PeerId) -> Option<&[Multiaddr]> {
         self.remote_addresses.get(peer).map(Vec::as_slice)
+    }
+
+    /// Iterates peers with at least one currently established connection.
+    pub fn connected_peers(&self) -> impl Iterator<Item = libp2p::PeerId> + '_ {
+        self.connected_peers.iter().copied()
+    }
+
+    /// Iterates peers with at least one currently established non-relayed connection.
+    pub fn direct_connected_peers(&self) -> impl Iterator<Item = libp2p::PeerId> + '_ {
+        self.direct_connection_counts.keys().copied()
     }
 
     /// Starts listening on a multiaddress.
@@ -477,18 +491,40 @@ impl Transport {
                     if !addresses.contains(&address) && addresses.len() < 8 {
                         addresses.push(address);
                     }
+                    if !endpoint.is_relayed() {
+                        let count = self.direct_connection_counts.entry(peer_id).or_default();
+                        *count = count.saturating_add(1);
+                    }
                     if num_established.get() == 1 {
+                        self.connected_peers.insert(peer_id);
                         return TransportEvent::PeerConnected(peer_id);
                     }
                 }
                 libp2p::swarm::SwarmEvent::ConnectionClosed {
                     peer_id,
-                    num_established: 0,
+                    endpoint,
+                    num_established,
                     ..
                 } => {
-                    self.fail_queued_for(peer_id);
-                    self.remote_addresses.remove(&peer_id);
-                    return TransportEvent::PeerDisconnected(peer_id);
+                    if !endpoint.is_relayed() {
+                        let remove_direct = self
+                            .direct_connection_counts
+                            .get_mut(&peer_id)
+                            .is_some_and(|count| {
+                                *count = count.saturating_sub(1);
+                                *count == 0
+                            });
+                        if remove_direct {
+                            self.direct_connection_counts.remove(&peer_id);
+                        }
+                    }
+                    if num_established == 0 {
+                        self.fail_queued_for(peer_id);
+                        self.remote_addresses.remove(&peer_id);
+                        self.connected_peers.remove(&peer_id);
+                        self.direct_connection_counts.remove(&peer_id);
+                        return TransportEvent::PeerDisconnected(peer_id);
+                    }
                 }
                 libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::Requests(
                     request_response::Event::Message { peer, message, .. },

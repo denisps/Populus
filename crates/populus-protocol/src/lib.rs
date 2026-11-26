@@ -2,7 +2,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use populus_types::{NetworkIdentity, NodeId, RoutingKey};
+use populus_types::{ContentId, NetworkIdentity, NodeId, RoutingKey, UtcDay};
 
 const MAGIC: &[u8; 3] = b"POP";
 const VERSION: u8 = 1;
@@ -24,6 +24,11 @@ const OBSERVED_ADDRESS_REQUEST: u8 = 3;
 const OBSERVED_ADDRESS: u8 = 4;
 const DIRECT_VOTE: u8 = 5;
 const ERROR_RESPONSE: u8 = 6;
+const DIRECT_VOTE_ACK: u8 = 7;
+const POPULARITY_QUERY: u8 = 8;
+const POPULARITY_RESPONSE: u8 = 9;
+const DELEGATED_INGEST_REPORT: u8 = 10;
+const DELEGATED_INGEST_ACK: u8 = 11;
 
 /// Typed refusal codes for requests that cannot be handled by the selected process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +111,33 @@ pub enum ApplicationMessage {
     Error {
         /// Typed refusal reason.
         code: ApplicationErrorCode,
+    },
+    /// Authority-signed acknowledgement of an accepted direct vote.
+    DirectVoteAck {
+        /// Canonical signed acknowledgement from `populus-cluster`.
+        acknowledgement: Vec<u8>,
+    },
+    /// Request the approximate popularity estimate for one content/day bucket.
+    PopularityQuery {
+        /// Immutable content identifier.
+        content_id: ContentId,
+        /// UTC-day bucket.
+        day: UtcDay,
+    },
+    /// Authority-signed popularity response.
+    PopularityResponse {
+        /// Canonical signed response from `populus-cluster`.
+        response: Vec<u8>,
+    },
+    /// Immutable delegated-ingest report sent to one authority.
+    DelegatedIngestReport {
+        /// Canonical report from `populus-cluster`.
+        report: Vec<u8>,
+    },
+    /// Authority-signed acknowledgement of one delegated-ingest report.
+    DelegatedIngestAck {
+        /// Canonical signed acknowledgement from `populus-cluster`.
+        acknowledgement: Vec<u8>,
     },
 }
 
@@ -220,6 +252,27 @@ impl ApplicationMessage {
                 bytes.push(ERROR_RESPONSE);
                 bytes.push(*code as u8);
             }
+            Self::DirectVoteAck { acknowledgement } => {
+                bytes.push(DIRECT_VOTE_ACK);
+                append_payload(&mut bytes, acknowledgement)?;
+            }
+            Self::PopularityQuery { content_id, day } => {
+                bytes.push(POPULARITY_QUERY);
+                bytes.extend_from_slice(content_id.as_bytes());
+                bytes.extend_from_slice(&day.to_bytes());
+            }
+            Self::PopularityResponse { response } => {
+                bytes.push(POPULARITY_RESPONSE);
+                append_payload(&mut bytes, response)?;
+            }
+            Self::DelegatedIngestReport { report } => {
+                bytes.push(DELEGATED_INGEST_REPORT);
+                append_payload(&mut bytes, report)?;
+            }
+            Self::DelegatedIngestAck { acknowledgement } => {
+                bytes.push(DELEGATED_INGEST_ACK);
+                append_payload(&mut bytes, acknowledgement)?;
+            }
         }
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(ProtocolError::MessageTooLarge);
@@ -314,6 +367,35 @@ impl ApplicationMessage {
                 };
                 Self::Error { code }
             }
+            DIRECT_VOTE_ACK => {
+                let length = decoder.payload_length()?;
+                Self::DirectVoteAck {
+                    acknowledgement: decoder.take(length)?.to_vec(),
+                }
+            }
+            POPULARITY_QUERY => Self::PopularityQuery {
+                content_id: ContentId::from_bytes(decoder.array::<36>()?)
+                    .map_err(|_| ProtocolError::InvalidField)?,
+                day: UtcDay::from_bytes(decoder.array()?),
+            },
+            POPULARITY_RESPONSE => {
+                let length = decoder.payload_length()?;
+                Self::PopularityResponse {
+                    response: decoder.take(length)?.to_vec(),
+                }
+            }
+            DELEGATED_INGEST_REPORT => {
+                let length = decoder.payload_length()?;
+                Self::DelegatedIngestReport {
+                    report: decoder.take(length)?.to_vec(),
+                }
+            }
+            DELEGATED_INGEST_ACK => {
+                let length = decoder.payload_length()?;
+                Self::DelegatedIngestAck {
+                    acknowledgement: decoder.take(length)?.to_vec(),
+                }
+            }
             _ => return Err(ProtocolError::UnknownMessage(tag)),
         };
         if decoder.position != bytes.len() {
@@ -321,6 +403,16 @@ impl ApplicationMessage {
         }
         Ok(message)
     }
+}
+
+fn append_payload(bytes: &mut Vec<u8>, payload: &[u8]) -> Result<(), ProtocolError> {
+    let length = u32::try_from(payload.len()).map_err(|_| ProtocolError::MessageTooLarge)?;
+    if payload.len() > MAX_MESSAGE_SIZE {
+        return Err(ProtocolError::MessageTooLarge);
+    }
+    bytes.extend_from_slice(&length.to_be_bytes());
+    bytes.extend_from_slice(payload);
+    Ok(())
 }
 
 fn encode_contact(bytes: &mut Vec<u8>, contact: &RoutingContact) -> Result<(), ProtocolError> {
@@ -395,6 +487,14 @@ impl Decoder<'_> {
         Ok(u64::from_be_bytes(self.array()?))
     }
 
+    fn payload_length(&mut self) -> Result<usize, ProtocolError> {
+        let length = usize::try_from(self.u32()?).map_err(|_| ProtocolError::MessageTooLarge)?;
+        if length > MAX_MESSAGE_SIZE {
+            return Err(ProtocolError::MessageTooLarge);
+        }
+        Ok(length)
+    }
+
     fn contact(&mut self) -> Result<RoutingContact, ProtocolError> {
         let node_id = NodeId::from_bytes(self.array()?);
         let identity_length = usize::from(self.u8()?);
@@ -440,7 +540,7 @@ mod tests {
 
     use std::net::SocketAddr;
 
-    use populus_types::{NetworkIdentity, NodeId, RoutingKey};
+    use populus_types::{ContentId, NetworkIdentity, NodeId, RoutingKey, UtcDay};
 
     use super::{ApplicationErrorCode, ApplicationMessage, ProtocolError, RoutingContact};
 
@@ -492,6 +592,29 @@ mod tests {
                 ApplicationMessage::decode(&message.encode().expect("encode")).expect("decode"),
                 message
             );
+            for message in [
+                ApplicationMessage::DirectVoteAck {
+                    acknowledgement: vec![0xaa, 0xbb],
+                },
+                ApplicationMessage::PopularityQuery {
+                    content_id: ContentId::from_digest([0; 32]),
+                    day: UtcDay::new(0),
+                },
+                ApplicationMessage::PopularityResponse {
+                    response: vec![0xcc, 0xdd, 0xee],
+                },
+                ApplicationMessage::DelegatedIngestReport {
+                    report: vec![0x11, 0x22],
+                },
+                ApplicationMessage::DelegatedIngestAck {
+                    acknowledgement: vec![0x33, 0x44],
+                },
+            ] {
+                assert_eq!(
+                    ApplicationMessage::decode(&message.encode().expect("encode")).expect("decode"),
+                    message
+                );
+            }
         }
         let vote = ApplicationMessage::DirectVote {
             vote: vec![4, 5, 6],
@@ -499,6 +622,24 @@ mod tests {
         assert_eq!(
             ApplicationMessage::decode(&vote.encode().expect("encode")).expect("decode"),
             vote
+        );
+    }
+
+    #[test]
+    fn delegated_ingest_envelopes_match_golden_vectors() {
+        let report = ApplicationMessage::DelegatedIngestReport {
+            report: vec![0x11, 0x22],
+        };
+        assert_eq!(
+            report.encode().expect("encode report"),
+            b"POP\x01\x0a\x00\x00\x00\x02\x11\x22"
+        );
+        let acknowledgement = ApplicationMessage::DelegatedIngestAck {
+            acknowledgement: vec![0x33, 0x44],
+        };
+        assert_eq!(
+            acknowledgement.encode().expect("encode acknowledgement"),
+            b"POP\x01\x0b\x00\x00\x00\x02\x33\x44"
         );
     }
 

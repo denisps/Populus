@@ -107,6 +107,21 @@ Exercise actual libp2p transports and framing.
 
 Do not use these for behaviors that can be tested more deterministically at lower levels.
 
+The current `populus-node` localhost integration test uses separate client and
+authority processes and the real transport. It submits a canonical direct
+vote, verifies the signed ACK against the installed membership, queries
+popularity, and verifies the signed response. Authority state is explicitly
+installed by the test; this does not exercise membership discovery, authority
+failover, or a five-process DHT neighborhood. A second localhost integration
+test sends an immutable delegated-ingest report from an installed
+`DelegatedIngestState` to an installed `DelegatedReportReceiver`, then applies
+the signed ACK to the sender's pending buffer. Membership and the individual
+authority contact are explicitly installed; the test does not exercise
+automatic four-authority fanout, recovery, or replacement.
+Observer tests also exercise the runtime `PeerId`-to-verified-`NodeId` mapping:
+two transport identities mapped to one `NodeId` contribute only one
+observation, while distinct `NodeId`s satisfy the observation threshold.
+
 ## Level 6: fuzzing
 
 Fuzz all untrusted decoders and protocol state-machine entry points.

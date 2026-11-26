@@ -3,6 +3,7 @@
 mod control_loop;
 mod delegated_ingest;
 mod direct_ingest;
+mod genesis;
 
 use populus_crypto::{
     AuthorityKeypair, PublicKeyAlgorithm, authority_id, validate_ed25519_public_key, verify_ed25519,
@@ -24,8 +25,9 @@ pub use delegated_ingest::{
 pub use direct_ingest::{
     DEFAULT_CLOSE_GRACE_PERIOD_MS, DEFAULT_MAX_CLOCK_SKEW_MS, DEFAULT_MAX_DIRECT_VOTES_PER_MINUTE,
     DailyPopularityStatus, DirectIngestError, DirectIngestPolicy, DirectIngestState, DirectVote,
-    DirectVoteOutcome, PersistentLike, SignedDirectVoteAck,
+    DirectVoteOutcome, PersistentLike, SignedDirectVoteAck, SignedPopularityResponse,
 };
+pub use genesis::{GenesisManifest, GenesisManifestError, GenesisMember};
 pub use ingest_assignment::{
     ASSIGNMENT_VERSION, AssignmentAlgorithm, AssignmentError, DelegationDescriptor,
     INGEST_VIEW_COUNT, IngestAssignment, IngestNode, MATCH_BITS_MAX, select_match_bits,

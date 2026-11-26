@@ -632,7 +632,8 @@ Three peers observe addresses in the same eligible /48
 Candidate IPv6 NetworkIdentity
 ```
 
-Multiple observations from one PeerId count as one observer.
+Multiple PeerIds mapped to the same verified active `NodeId` count as one
+observer.
 
 Prefer observations from distinct verified NodeIds and diverse
 network identities where possible.
@@ -668,7 +669,8 @@ For a candidate NetworkIdentity:
 The verifier set is derived deterministically from the
 candidate NodeId's DHT neighborhood, excluding the claimant.
 
-The initial target is three independent successful confirmations.
+The initial target is three successful confirmations from distinct verified
+active `NodeId`s; it does not establish physical-operator independence.
 
 The precise verifier quorum and membership rules must be tested
 for overlap, partitions, and malicious verifiers before being
@@ -1002,6 +1004,85 @@ Verifier quorum rules, active-binding arbitration,
 candidate-registry capacity, and eclipse resistance must
 be tested before the relevant protocol behavior is frozen.
 
+## 5.10.1 Agreed Phase 11.5 protocol decisions
+
+These are the implementation decisions for Phase 11.5; they are not claims
+that the corresponding distributed protocol is already implemented.
+
+Observation and verifier quorums count distinct, currently verified active
+`NodeId`s. Several `PeerId`s claiming one active `NodeId` count once. A process
+may present multiple active `NodeId`s, which count as distinct protocol
+identities. This does not establish that the identities belong to distinct
+physical operators, people, or organizations; Populus cannot reliably infer
+that fact. Unknown or unbound `PeerId`s do not contribute observations or
+verification votes.
+
+For a target `NodeId`, the committee is the four closest distinct active
+`NodeId`s in a specific committed eligibility snapshot, ordered by XOR distance
+to the target and then by `NodeId`. Each committee record is bound to the
+network identifier, target `NodeId`, membership epoch, and a hash of the
+preceding committee certificate. A binding decision additionally names the
+exact committee hash and epoch, binding generation, preceding binding
+certificate hash, selected `PeerId`, and lease. A verifier signature is valid
+only for that complete context.
+
+A membership transition is accepted only as the next link in the certified
+committee chain and with at least three signatures from the exact preceding
+four-member committee. The previous committee certifies a deterministic next
+committee selected from the transition's committed eligibility snapshot.
+Signatures from a different or newer committee cannot independently authorize
+the same transition. Each honest voter must persist its vote before returning
+a signature and refuse a conflicting vote for the same target, committee
+epoch, and preceding binding. The safety argument assumes at most one
+Byzantine member in a four-member committee and durable non-equivocation by
+honest members; a 3-of-4 certificate is not safe without these assumptions.
+No quorum, committee-chain conflict, or inconsistent eligibility snapshot
+leaves the election unresolved. A still-valid healthy incumbent binding stays
+in force during that unresolved period; no local tie-break or candidate
+ranking may displace it. Once its lease is no longer valid, this protocol does
+not invent a replacement or claim availability.
+
+Genesis is rooted in an operator-provisioned, out-of-band trusted signing key
+and a signed manifest for one network. The manifest names exactly four
+distinct initial `NodeId`s, their normalized `NetworkIdentity`, expected
+transport `PeerId` and public key, and direct dial addresses. Each initial
+member must prove the identity derivation and direct authenticated reachability
+before joining the genesis committee. The manifest hash is the epoch-zero
+committee-chain root. This permits a new network to form without any previously
+verified Populus node, but it trusts the manifest signer and the four declared
+members; it is not permission for an isolated ordinary node to declare itself
+genesis. Missing or unreachable bootstrap peers never activate genesis.
+
+Candidate registrations are signed by the transport identity they bind,
+sequence-numbered, expiring discovery records, not ownership certificates.
+The existing Populus DHT stores them in a bounded deterministic shard index;
+enumeration is paginated and bounded. Standby preference is derived only from
+independently verified renewal/reachability history, then ordered by
+`PeerId`. Self-reported uptime, extra ports, registration volume, and improved
+ranking do not rotate a healthy incumbent. A standby can be promoted only by a
+valid binding decision under the committee chain above.
+
+The local identity manager now keys observation evidence by active `NodeId`
+rather than connection `PeerId`; its injectable observation boundary remains
+separate from the production `NetworkIdentity` validator. Direct and delegated
+ingest have bounded wire adapters into the existing cluster state machines,
+but their membership is installed by the caller. The application still lacks
+the certified committee chain, signed candidate registry, durable
+anti-equivocation journal, automatic verifier selection, and authority
+discovery/state-replication. A signed four-member genesis manifest and
+out-of-band trust key can now be loaded by the runtime; each local process
+activates only after direct authenticated connections to the other three
+manifest peers and three distinct manifest-member observations agree on its
+identity. Genesis addresses are intentionally restricted to direct IP
+multiaddresses matching the declared normalized identity. The runtime does
+not compare the manifest's network identifier to a separately configured
+network identifier, and manifest membership is not a substitute for the
+missing committee-transition protocol. The delegated adapter also requires
+the caller to send a pending report to each eligible authority; it does not
+perform membership discovery, automatic four-authority fanout/retry, durable
+sender/receiver recovery, or replacement. Local state-machine tests do not
+establish distributed ownership safety.
+
 Phase 11.5 runtime work is in progress. The current implementation
 does not claim that all identity ownership or security mechanisms
 below are complete.
@@ -1022,7 +1103,9 @@ The current application envelope is:
 ```
 
 Version 1 defines bounded `FindNode`, routing-contact response,
-observed-address request/response, direct-vote, and typed error messages.
+observed-address request/response, direct-vote and signed-acknowledgement,
+popularity query/response, delegated-ingest report/acknowledgement, and typed
+error messages.
 Unknown versions, tags, malformed fields, trailing bytes, and payloads
 larger than 1 MiB are rejected. A routing response contains at most 20
 contacts; a contact contains at most 8 addresses, each at most 256 bytes.
@@ -1038,13 +1121,35 @@ independently verify its active binding and direct reachability first.
 
 `PopulusProcess` shares one transport PeerId across independently routed
 logical nodes. Its local identity manager correlates observations by nonce,
-counts distinct authenticated observer PeerIds, normalizes IPv6 addresses
-using the existing `/48` policy, and expires observations and verification
-evidence. The initial limits are four active identities, 64 tracked
+counts distinct verified active `NodeId`s rather than `PeerId`s, normalizes
+IPv6 addresses using the existing `/48` policy, and expires observations and
+verification evidence. This does not claim distinct physical operators. The
+initial limits are four active identities, 64 tracked
 identities, and 64 observers per identity. The direct-verification API
 accepts a result only after its caller has authenticated the candidate
 PeerId, checked the fresh challenge, and established direct reachability;
 the manager itself does not validate signed verifier certificates.
+
+The network process can install a caller-validated content/day authority
+membership and signing key. It then uses the existing direct-ingest state
+machine to authenticate the source `ClientId` from the direct connection's
+public endpoint, validate and idempotently record votes, sign each accepted
+vote acknowledgement, and serve membership-bound signed popularity estimates.
+The source identity resolver uses the unchanged production `NetworkIdentity`
+eligibility policy; localhost integration tests inject an identity result only
+through a test-only hook. This adapter does not discover or certify authority
+membership, replicate authority snapshots, or implement membership replacement.
+
+Delegated ingest similarly uses the existing `DelegatedIngestState` sender
+buffer and `DelegatedReportReceiver`: callers install membership-bound sender
+or receiver state, reports are accepted only from a transport `PeerId` mapped
+to the report's verified active `NodeId`, and accepted reports receive a
+membership-signed ACK. Returned ACKs are checked against the exact pending
+scope, authority signer, verified peer binding, and existing sender buffer;
+that state machine retains reports until all four expected authorities ACK.
+This is a real request/response adapter, not a replacement ingest model, but
+authority selection/contact discovery, four-recipient fanout, retry scheduling,
+membership transitions, and crash recovery are not automated.
 
 The file-backed PeerIdentityStore persists libp2p protobuf key encoding in
 a create-once file (0600 on Unix). Bootstrap and discovered contacts are
@@ -1057,10 +1162,11 @@ This runtime boundary is intentionally not described as a completed
 Phase 11.5 security protocol: signed candidate registrations, deterministic
 registry sharding, persistence-based standby ranking, quorum-backed
 active-NodeID arbitration, automatic verifier selection/dial-back, periodic
-renewal and recovery, authority/delegated-ingest wire integration, and
-durable bootstrap contacts remain unimplemented. Direct votes received by
-the current CLI are explicitly refused when no authority is available;
-they are not acknowledged as counted.
+verification renewal and recovery, authority membership discovery and
+state-replication, automated delegated-ingest fanout/retry and recovery, and
+durable bootstrap contacts remain unimplemented. A direct vote is acknowledged
+as counted only when a caller-installed authority state accepts it; otherwise
+the process returns a typed refusal and does not claim success.
 
 ---
 

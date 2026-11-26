@@ -615,6 +615,188 @@ pub enum DailyPopularityStatus {
     },
 }
 
+/// A signed authority estimate for one content item and UTC day.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedPopularityResponse {
+    content_id: ContentId,
+    day: UtcDay,
+    membership_generation: u64,
+    estimate_bits: u64,
+    finalized: bool,
+    signer: AuthorityId,
+    signature: [u8; 64],
+}
+
+impl SignedPopularityResponse {
+    /// Signs an estimate as a member of its content's current authority view.
+    ///
+    /// The estimate is represented as canonical IEEE-754 bits; NaN, infinity,
+    /// and negative estimates are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DirectIngestError::WrongMembership`],
+    /// [`DirectIngestError::UnexpectedAcknowledgement`], or
+    /// [`DirectIngestError::InvalidPopularityEstimate`] when its inputs do not
+    /// satisfy the wire contract.
+    pub fn sign(
+        content_id: ContentId,
+        day: UtcDay,
+        membership: &crate::MembershipView,
+        estimate: f64,
+        finalized: bool,
+        signer: &AuthorityKeypair,
+    ) -> Result<Self, DirectIngestError> {
+        validate_popularity_membership(content_id, membership)?;
+        let estimate = canonical_estimate(estimate)?;
+        let signer_id = signer.authority_id();
+        let member = membership
+            .member(signer_id)
+            .ok_or(DirectIngestError::UnexpectedAcknowledgement)?;
+        if member.public_key() != &signer.public_key() {
+            return Err(DirectIngestError::UnexpectedAcknowledgement);
+        }
+        let mut response = Self {
+            content_id,
+            day,
+            membership_generation: membership.generation(),
+            estimate_bits: estimate.to_bits(),
+            finalized,
+            signer: signer_id,
+            signature: [0; 64],
+        };
+        response.signature = signer.sign(&response.message());
+        Ok(response)
+    }
+
+    /// Returns the signed content and epoch scope.
+    #[must_use]
+    pub const fn scope(&self) -> (ContentId, UtcDay) {
+        (self.content_id, self.day)
+    }
+
+    /// Returns the authenticated approximate popularity estimate.
+    #[must_use]
+    pub fn estimate(&self) -> f64 {
+        f64::from_bits(self.estimate_bits)
+    }
+
+    /// Returns whether the authority finalized this daily bucket.
+    #[must_use]
+    pub const fn finalized(&self) -> bool {
+        self.finalized
+    }
+
+    /// Returns the signing authority identity.
+    #[must_use]
+    pub const fn signer(&self) -> AuthorityId {
+        self.signer
+    }
+
+    /// Encodes the signed result in canonical v1 form.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(4 + 1 + 36 + 8 + 8 + 8 + 1 + 32 + 64);
+        bytes.extend_from_slice(b"PPST");
+        bytes.push(1);
+        bytes.extend_from_slice(self.content_id.as_bytes());
+        bytes.extend_from_slice(&self.day.to_bytes());
+        bytes.extend_from_slice(&self.membership_generation.to_be_bytes());
+        bytes.extend_from_slice(&self.estimate_bits.to_be_bytes());
+        bytes.push(u8::from(self.finalized));
+        bytes.extend_from_slice(self.signer.as_bytes());
+        bytes.extend_from_slice(&self.signature);
+        bytes
+    }
+
+    /// Decodes a canonical bounded result; callers must still verify its signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DirectIngestError::InvalidStateEncoding`] for malformed
+    /// bytes and [`DirectIngestError::InvalidPopularityEstimate`] for an
+    /// invalid estimate representation.
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, DirectIngestError> {
+        let mut cursor = StateCursor::new(bytes);
+        if cursor.take::<4>()? != *b"PPST" || cursor.byte()? != 1 {
+            return Err(DirectIngestError::InvalidStateEncoding);
+        }
+        let content_id = ContentId::from_bytes(cursor.take::<36>()?)
+            .map_err(|_| DirectIngestError::InvalidStateEncoding)?;
+        let day = UtcDay::from_bytes(cursor.take::<8>()?);
+        let membership_generation = u64::from_be_bytes(cursor.take::<8>()?);
+        let estimate_bits = u64::from_be_bytes(cursor.take::<8>()?);
+        let estimate = canonical_estimate(f64::from_bits(estimate_bits))?;
+        if estimate.to_bits() != estimate_bits {
+            return Err(DirectIngestError::InvalidPopularityEstimate);
+        }
+        let finalized = match cursor.byte()? {
+            0 => false,
+            1 => true,
+            _ => return Err(DirectIngestError::InvalidStateEncoding),
+        };
+        let signer = AuthorityId::from_bytes(cursor.take::<32>()?);
+        let signature = cursor.take::<64>()?;
+        cursor.remaining_exact(0)?;
+        Ok(Self {
+            content_id,
+            day,
+            membership_generation,
+            estimate_bits,
+            finalized,
+            signer,
+            signature,
+        })
+    }
+
+    /// Verifies the scope, membership generation, signer, and signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the result is for another view or has an
+    /// invalid signer/signature.
+    pub fn verify(&self, membership: &crate::MembershipView) -> Result<(), DirectIngestError> {
+        validate_popularity_membership(self.content_id, membership)?;
+        if membership.generation() != self.membership_generation {
+            return Err(DirectIngestError::UnexpectedAcknowledgement);
+        }
+        let member = membership
+            .member(self.signer)
+            .ok_or(DirectIngestError::UnexpectedAcknowledgement)?;
+        verify_ed25519(member.public_key(), &self.message(), &self.signature)
+            .map_err(|_| DirectIngestError::UnexpectedAcknowledgement)
+    }
+
+    fn message(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(32 + 36 + 8 + 8 + 8 + 1 + 32);
+        bytes.extend_from_slice(b"populus/popularity-response/v1");
+        bytes.extend_from_slice(self.content_id.as_bytes());
+        bytes.extend_from_slice(&self.day.to_bytes());
+        bytes.extend_from_slice(&self.membership_generation.to_be_bytes());
+        bytes.extend_from_slice(&self.estimate_bits.to_be_bytes());
+        bytes.push(u8::from(self.finalized));
+        bytes.extend_from_slice(self.signer.as_bytes());
+        bytes
+    }
+}
+
+fn validate_popularity_membership(
+    content_id: ContentId,
+    membership: &crate::MembershipView,
+) -> Result<(), DirectIngestError> {
+    if membership.routing_key() != routing_key(RoutingIdentifier::Content(&content_id)) {
+        return Err(DirectIngestError::WrongMembership);
+    }
+    Ok(())
+}
+
+fn canonical_estimate(estimate: f64) -> Result<f64, DirectIngestError> {
+    if !estimate.is_finite() || estimate < 0.0 {
+        return Err(DirectIngestError::InvalidPopularityEstimate);
+    }
+    Ok(if estimate == 0.0 { 0.0 } else { estimate })
+}
+
 /// One authority's direct-mode popularity state for a content item and UTC day.
 ///
 /// The caller supplies an already validated `ClientId`; binding a remote
@@ -932,6 +1114,8 @@ pub enum DirectIngestError {
     WrongContent,
     /// The vote belongs to another UTC day.
     WrongDay,
+    /// The caller did not bind the transport source to the claimed `ClientId`.
+    ClientIdentityMismatch,
     /// The membership view routes to another content item.
     WrongMembership,
     /// An older authority membership was supplied while a vote is pending.
@@ -950,6 +1134,8 @@ pub enum DirectIngestError {
     RateCounterOverflow,
     /// A client acknowledgement does not match its outstanding vote.
     UnexpectedAcknowledgement,
+    /// A signed popularity estimate is negative, nonfinite, or noncanonical.
+    InvalidPopularityEstimate,
     /// The encoded authority state exceeds the Phase 7 component limit.
     StateTooLarge,
     /// The encoded authority state is malformed, noncanonical, or unsupported.
@@ -966,6 +1152,9 @@ impl fmt::Display for DirectIngestError {
             ),
             Self::WrongContent => formatter.write_str("vote belongs to another content item"),
             Self::WrongDay => formatter.write_str("vote belongs to another UTC day"),
+            Self::ClientIdentityMismatch => {
+                formatter.write_str("vote ClientId does not match the authenticated source")
+            }
             Self::WrongMembership => {
                 formatter.write_str("authority membership does not route to this content")
             }
@@ -986,6 +1175,9 @@ impl fmt::Display for DirectIngestError {
             }
             Self::UnexpectedAcknowledgement => {
                 formatter.write_str("acknowledgement does not match the pending vote")
+            }
+            Self::InvalidPopularityEstimate => {
+                formatter.write_str("popularity estimate is invalid")
             }
             Self::StateTooLarge => {
                 formatter.write_str("direct-ingest state exceeds its size limit")

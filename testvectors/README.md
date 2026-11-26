@@ -93,6 +93,9 @@ independently.
 
 `populus-application-v1.txt` fixes the `POP` marker, v1 envelope tags,
 nonce byte order, direct-vote payload length, and typed error encoding.
+It also includes fixed encodings for the direct-vote acknowledgement,
+popularity query and response, and delegated-ingest report and acknowledgement
+envelopes.
 The decoder also has behavioral tests for bounded routing contacts,
 multiaddress lengths, unsupported versions, malformed fields, and trailing
 bytes.

@@ -94,3 +94,8 @@
   contact state through the Phase 15 storage interfaces. Restore it only as
   expired/untrusted hints and require fresh reachability and ownership evidence
   before a saved contact or NodeID can re-enter eligible routing.
+- Bind a configured network identifier into the process and every relevant
+  protocol/signature context before supporting multiple isolated Populus
+  networks. Genesis manifests currently sign a network identifier, but the
+  runtime does not compare it with a separately configured value and ordinary
+  application messages do not establish network isolation.

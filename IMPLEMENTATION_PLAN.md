@@ -2080,14 +2080,48 @@ Phase 11.5 is complete when:
 20. ARCHITECTURE.md, TESTING.md, and AGENTS.md document the
     implemented identity lifecycle and verification assumptions.
 
-Current implementation status: the runtime/process, bounded v1 envelope,
-persistent PeerId, local observation/verification state, and localhost bootstrap
-foundation are implemented. Phase 11.5 is not complete until signed candidate
-registration, candidate persistence/ranking, distributed active-NodeID
-arbitration, automatic verifier selection and renewal, authority/delegated-ingest
-network integration, and the five-process/failure-simulation criteria above
-are implemented and validated. Do not treat passing the current local tests as
-evidence that those missing mechanisms are present.
+Current acceptance status:
+
+- **Fully implemented:** 1 (default startup without a manually supplied public
+  identity), 7 (multiple logical NodeIDs have separate local routing state),
+  18 (the current localhost integration and deterministic simulation tests pass;
+  this does not establish the deferred distributed scenarios).
+- **Partially implemented:** 2 (bounded DHT contact discovery exists, but
+  authority discovery and durable bootstrap are absent); 3 (runtime observation
+  refresh exists, but identity lifecycle changes do not automatically complete
+  verification and activation); 4 (NodeID-deduplicated observation threshold
+  exists, without a network-wide signed verifier protocol); 5 (the state
+  machine requires authenticated direct reachability evidence from its caller,
+  but automatic challenge/dial-back is absent); 6 (local activation is
+  available through an explicit signed genesis manifest or local
+  verification, but not certified ownership arbitration); 12 (observations are
+  refreshed without restart, but verified binding replacement/retirement is
+  not automatic); 13 (custom DHT routing exists, authority membership
+  discovery does not); 15 (a localhost direct-vote and signed-popularity
+  adapter uses the existing direct-ingest state machine when authority
+  membership is explicitly installed); 17 (a localhost report/ACK path uses
+  the existing delegated sender/receiver state machines, but requires caller-
+  installed membership and contacts and lacks automatic fanout/recovery); 19 (identity/contact limits exist, but
+  network-wide and connection limits are not established); 20 (the architecture
+  records the decisions and limitations, while full lifecycle/test/operations
+  guidance remains incomplete).
+- **Deferred:** 8 (signed multi-candidate registration), 9 (distributed
+  incumbent/standby arbitration), 10 (candidate ranking and promotion), 11
+  (committee-bound conflict detection and safe resolution), 14 (five-process
+  DHT scenario), and 16 (authority replacement and state recovery).
+
+Phase 11.5 is not complete. In particular, committee-chain certificates,
+durable anti-equivocation, candidate registry/sharding, automatic verifier
+selection and renewal, authority membership/state replication, automated
+delegated-ingest fanout/retry and recovery, and five-process failure/recovery
+simulation are not implemented. A trusted signed genesis manifest is loaded
+and gates local genesis activation, but its network identifier is not compared
+against a separately configured runtime network identifier, and it does not
+provide safe post-genesis membership transitions. Delegated-ingest networking
+exists only as an explicitly installed request/response path; its membership
+discovery, automatic four-authority fanout/retry, and durable recovery remain
+unresolved. Passing local tests is not evidence that missing mechanisms are
+present or secure.
 
 The identity-verification and arbitration assumptions must be stated
 explicitly. Passing a local test does not establish that the protocol

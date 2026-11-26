@@ -29,6 +29,10 @@ fn identity_observation_lifecycle_is_seeded_bounded_and_expires_on_virtual_time(
             .to_peer_id()
     }
 
+    fn observer(seed: u8) -> NodeId {
+        NodeId::from_bytes([seed; 32])
+    }
+
     let mut manager = IdentityManager::new(
         peer(99),
         IdentityManagerConfig {
@@ -40,11 +44,11 @@ fn identity_observation_lifecycle_is_seeded_bounded_and_expires_on_virtual_time(
     let ipv4_identity = populus_types::NetworkIdentity::from_ip("8.8.8.8".parse().expect("IPv4"))
         .expect("eligible identity");
 
-    for (index, observer) in [(0_u8, peer(1)), (1, peer(2))] {
+    for (index, observer_node_id) in [(0_u8, observer(1)), (1, observer(2))] {
         assert_eq!(
             manager
                 .observe(
-                    observer,
+                    observer_node_id,
                     [index; 16],
                     [index; 16],
                     "8.8.8.8:4000".parse().expect("endpoint"),
@@ -58,7 +62,7 @@ fn identity_observation_lifecycle_is_seeded_bounded_and_expires_on_virtual_time(
     assert_eq!(
         manager
             .observe(
-                peer(1),
+                observer(1),
                 [3; 16],
                 [3; 16],
                 "8.8.8.8:4001".parse().expect("endpoint"),
@@ -71,7 +75,7 @@ fn identity_observation_lifecycle_is_seeded_bounded_and_expires_on_virtual_time(
     assert_eq!(
         manager
             .observe(
-                peer(3),
+                observer(3),
                 [4; 16],
                 [4; 16],
                 "8.8.8.8:4000".parse().expect("endpoint"),
@@ -95,7 +99,7 @@ fn identity_observation_lifecycle_is_seeded_bounded_and_expires_on_virtual_time(
     {
         manager
             .observe(
-                peer(u8::try_from(index + 5).expect("small seed")),
+                observer(u8::try_from(index + 5).expect("small seed")),
                 [u8::try_from(index).expect("small nonce"); 16],
                 [u8::try_from(index).expect("small nonce"); 16],
                 format!("[{address}]:4000").parse().expect("endpoint"),

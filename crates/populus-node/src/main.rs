@@ -1,13 +1,13 @@
 //! Runnable Populus transport process.
 
-use std::{net::IpAddr, path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode};
 
+use populus_cluster::GenesisManifest;
 use populus_network::parse_multiaddr;
 use populus_node::{
     ApplicationErrorCode, ApplicationMessage, FilePeerIdentityStore, IdentityManagerConfig,
     PopulusProcess, ProcessEvent,
 };
-use populus_types::NetworkIdentity;
 use tracing::{Level, error, info, warn};
 
 const DEFAULT_LISTEN: &str = "/ip4/0.0.0.0/tcp/4001";
@@ -20,7 +20,8 @@ struct RunOptions {
     bootstrap_addresses: Vec<String>,
     identity_key_path: PathBuf,
     max_node_ids: usize,
-    genesis_identity: Option<String>,
+    genesis_manifest_path: Option<PathBuf>,
+    genesis_trust_key_path: Option<PathBuf>,
 }
 
 impl Default for RunOptions {
@@ -30,7 +31,8 @@ impl Default for RunOptions {
             bootstrap_addresses: Vec::new(),
             identity_key_path: PathBuf::from(DEFAULT_IDENTITY_PATH),
             max_node_ids: 4,
-            genesis_identity: None,
+            genesis_manifest_path: None,
+            genesis_trust_key_path: None,
         }
     }
 }
@@ -79,10 +81,12 @@ fn print_usage() {
     eprintln!(
         "Usage: populus-node run [--config FILE] [--listen MULTIADDR] \
          [--bootstrap MULTIADDR] [--identity-key FILE] [--max-node-ids N] \
-         [--genesis-identity PUBLIC-IP]"
+         [--genesis-manifest FILE --genesis-trust-key FILE]"
     );
     eprintln!("Defaults: listen on {DEFAULT_LISTEN}; persist PeerId in {DEFAULT_IDENTITY_PATH}.");
-    eprintln!("Genesis identity bypasses verification and is only for isolated test networks.");
+    eprintln!(
+        "Genesis requires a signed four-member manifest and an out-of-band raw 32-byte trust key."
+    );
 }
 
 fn parse_options(arguments: &[String]) -> Result<RunOptions, String> {
@@ -125,9 +129,19 @@ fn parse_options(arguments: &[String]) -> Result<RunOptions, String> {
                     .parse()
                     .map_err(|_| "max-node-ids must be an integer".to_owned())?;
             }
-            "--genesis-identity" => options.genesis_identity = Some(value.clone()),
+            "--genesis-manifest" => {
+                options.genesis_manifest_path = Some(PathBuf::from(value));
+            }
+            "--genesis-trust-key" => {
+                options.genesis_trust_key_path = Some(PathBuf::from(value));
+            }
             _ => return Err(format!("unknown option: {option}")),
         }
+    }
+    if options.genesis_manifest_path.is_some() != options.genesis_trust_key_path.is_some() {
+        return Err(
+            "--genesis-manifest and --genesis-trust-key must be supplied together".to_owned(),
+        );
     }
     if options.max_node_ids == 0 || options.max_node_ids > MAX_CONFIGURED_NODE_IDS {
         return Err(format!(
@@ -171,7 +185,12 @@ fn parse_config_file(path: &std::path::Path, options: &mut RunOptions) -> Result
                     format!("invalid max_node_ids on config line {}", line_index + 1)
                 })?;
             }
-            "genesis_identity" => options.genesis_identity = Some(value.to_owned()),
+            "genesis_manifest" => {
+                options.genesis_manifest_path = Some(PathBuf::from(value));
+            }
+            "genesis_trust_key" => {
+                options.genesis_trust_key_path = Some(PathBuf::from(value));
+            }
             _ => {
                 return Err(format!(
                     "unknown config key {key:?} on line {}",
@@ -183,25 +202,46 @@ fn parse_config_file(path: &std::path::Path, options: &mut RunOptions) -> Result
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run(options: RunOptions) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut identity_config = IdentityManagerConfig {
+    let identity_config = IdentityManagerConfig {
         max_active_nodes: options.max_node_ids,
         ..IdentityManagerConfig::default()
     };
-    let mut genesis = None;
-    if let Some(address) = options.genesis_identity {
-        let address: IpAddr = address.parse()?;
-        genesis = Some(NetworkIdentity::from_ip(address)?);
-        identity_config.genesis_mode = true;
-    }
-
     let store = FilePeerIdentityStore::new(options.identity_key_path);
     let mut process = PopulusProcess::with_identity_store(&store, identity_config)?;
     info!(peer_id = %process.peer_id(), "persistent Populus process identity loaded");
-    if let Some(identity) = genesis {
-        let node_id = process.activate_genesis_identity(identity)?;
-        warn!(%node_id, "genesis identity enabled; verification is bypassed for this test network");
-    }
+    let genesis_addresses = match (
+        options.genesis_manifest_path,
+        options.genesis_trust_key_path,
+    ) {
+        (Some(manifest_path), Some(trust_key_path)) => {
+            let manifest_bytes = std::fs::read(&manifest_path)?;
+            let manifest = GenesisManifest::deserialize(&manifest_bytes)?;
+            let trust_key_bytes = std::fs::read(&trust_key_path)?;
+            let trusted_public_key: [u8; 32] =
+                trust_key_bytes.as_slice().try_into().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "genesis trust-key file must contain exactly 32 raw bytes",
+                    )
+                })?;
+            let addresses = process.configure_genesis_manifest(manifest, trusted_public_key)?;
+            info!(
+                manifest = %manifest_path.display(),
+                "explicit signed genesis manifest loaded; awaiting direct-member quorum"
+            );
+            addresses
+        }
+        (None, None) => Vec::new(),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "--genesis-manifest and --genesis-trust-key must be supplied together",
+            )
+            .into());
+        }
+    };
 
     for address in options.listen_addresses {
         process.listen_on(parse_multiaddr(&address)?)?;
@@ -212,7 +252,7 @@ async fn run(options: RunOptions) -> Result<(), Box<dyn std::error::Error + Send
         .iter()
         .map(|address| parse_multiaddr(address))
         .collect::<Result<Vec<_>, _>>()?;
-    let bootstrap_count = process.bootstrap(bootstrap)?;
+    let bootstrap_count = process.bootstrap(bootstrap.into_iter().chain(genesis_addresses))?;
     info!(bootstrap_count, "bootstrap attempts started");
 
     loop {
@@ -223,12 +263,22 @@ async fn run(options: RunOptions) -> Result<(), Box<dyn std::error::Error + Send
                 break;
             }
             event = process.next_event() => {
+                if let Some(node_id) = process.try_activate_genesis_manifest()? {
+                    info!(%node_id, "signed genesis membership and direct observation quorum activated");
+                }
                 match event {
                     ProcessEvent::Transport(event) => info!(?event, "transport event"),
-                    ProcessEvent::IdentityObservation { peer, result } => match result {
-                        Ok(lifecycle) => info!(%peer, ?lifecycle, "public identity observation updated"),
-                        Err(error) => warn!(%peer, %error, "public identity observation rejected"),
-                    },
+                    ProcessEvent::IdentityObservation { peer, results } => {
+                        for (observer_node_id, result) in results {
+                            match result {
+                                Ok(lifecycle) => info!(%peer, %observer_node_id, ?lifecycle, "public identity observation updated"),
+                                Err(error) => warn!(%peer, %observer_node_id, %error, "public identity observation rejected"),
+                            }
+                        }
+                    }
+                    ProcessEvent::UnverifiedIdentityObserver { peer } => {
+                        warn!(%peer, "address observation ignored because sender has no verified active NodeId binding");
+                    }
                     ProcessEvent::DirectVoteRequest { peer, vote, channel } => {
                         let code = match vote {
                             Ok(vote) => {
@@ -246,6 +296,50 @@ async fn run(options: RunOptions) -> Result<(), Box<dyn std::error::Error + Send
                         ) {
                             warn!(%peer, %error, "direct vote refusal could not be sent");
                         }
+                    }
+                    ProcessEvent::DirectVoteAccepted {
+                        peer,
+                        content_id,
+                        outcome,
+                    } => info!(
+                        %peer,
+                        %content_id,
+                        estimate = outcome.provisional_estimate,
+                        current_minute_deliveries = outcome.current_minute_deliveries,
+                        delegation_recommended = outcome.delegation_recommended,
+                        "direct vote accepted"
+                    ),
+                    ProcessEvent::DirectVoteRejected { peer, error } => {
+                        warn!(%peer, %error, "direct vote rejected by authority state machine");
+                    }
+                    ProcessEvent::NoActiveAuthority { peer, content_id } => {
+                        warn!(%peer, %content_id, "no active authority state for requested content");
+                    }
+                    ProcessEvent::PopularityQueryServed {
+                        peer,
+                        content_id,
+                        estimate,
+                        finalized,
+                    } => info!(%peer, %content_id, estimate, finalized, "signed popularity query served"),
+                    ProcessEvent::PopularityQueryRejected { peer, error } => {
+                        warn!(%peer, %error, "popularity query rejected by authority state machine");
+                    }
+                    ProcessEvent::DelegatedReportAccepted {
+                        peer,
+                        scope,
+                        sequence,
+                    } => info!(%peer, content_id = %scope.0, day = scope.1.value(), view = scope.2, sequence, "delegated ingest report accepted"),
+                    ProcessEvent::DelegatedReportRejected { peer, error } => {
+                        warn!(%peer, %error, "delegated ingest report rejected");
+                    }
+                    ProcessEvent::DelegatedIngestAcknowledged {
+                        peer,
+                        scope,
+                        sequence,
+                        completed,
+                    } => info!(%peer, content_id = %scope.0, day = scope.1.value(), view = scope.2, sequence, completed, "delegated ingest report acknowledgement applied"),
+                    ProcessEvent::DelegatedIngestAckRejected { peer, error } => {
+                        warn!(%peer, %error, "delegated ingest acknowledgement rejected");
                     }
                     ProcessEvent::ApplicationRequest { peer, message, channel } => {
                         warn!(%peer, ?message, "unsupported application request");
