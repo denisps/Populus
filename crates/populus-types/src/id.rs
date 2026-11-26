@@ -142,6 +142,11 @@ macro_rules! fixed_id {
 }
 
 fixed_id!(
+    NetworkId,
+    "A `NetworkId` identifies one intentionally configured Populus network. \
+     It is exactly 32 bytes and is independent of every signing key or bootstrap peer."
+);
+fixed_id!(
     NodeId,
     "A `NodeId` is the v1 scarce-network-derived position of a node in Populus XOR routing. \
      It is exactly 32 bytes and remains associated with the normalized address resource; \

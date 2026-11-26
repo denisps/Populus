@@ -2,11 +2,17 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use populus_types::{ContentId, NetworkIdentity, NodeId, RoutingKey, UtcDay};
+use populus_types::{ContentId, NetworkId, NetworkIdentity, NodeId, RoutingKey, UtcDay};
 
 const MAGIC: &[u8; 3] = b"POP";
 const VERSION: u8 = 1;
-const HEADER_LEN: usize = MAGIC.len() + 2;
+const HEADER_LEN: usize = MAGIC.len() + 1 + 32 + 1;
+const MESSAGE_TAG_OFFSET: usize = MAGIC.len() + 1 + 32;
+/// Fixed public-network identifier: SHA-256 of `populus/public-network/v1`.
+pub const PUBLIC_NETWORK_ID: NetworkId = NetworkId::from_bytes([
+    0x1f, 0x0b, 0x23, 0xdb, 0xc0, 0x89, 0x98, 0xaa, 0xde, 0x8b, 0x8d, 0x78, 0xd8, 0x08, 0x63, 0x17,
+    0x46, 0x7b, 0x8e, 0x1d, 0x57, 0xdd, 0x25, 0x5c, 0xed, 0x5c, 0xd2, 0x90, 0x8b, 0x61, 0x77, 0x4f,
+]);
 /// Maximum encoded application message size.
 pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 /// Maximum contacts returned by one lookup response.
@@ -160,6 +166,8 @@ pub enum ProtocolError {
     Truncated,
     /// The fixed application-message marker is absent.
     InvalidMagic,
+    /// The message is for a different configured Populus network.
+    NetworkMismatch,
     /// The wire version is not supported.
     UnsupportedVersion(u8),
     /// The message tag is not defined by this version.
@@ -177,6 +185,9 @@ impl std::fmt::Display for ProtocolError {
         match self {
             Self::Truncated => formatter.write_str("truncated Populus application message"),
             Self::InvalidMagic => formatter.write_str("invalid Populus application marker"),
+            Self::NetworkMismatch => {
+                formatter.write_str("Populus message belongs to another network")
+            }
             Self::UnsupportedVersion(version) => {
                 write!(
                     formatter,
@@ -203,9 +214,20 @@ impl ApplicationMessage {
     /// Returns [`ProtocolError`] if a field is invalid or the encoded message
     /// exceeds [`MAX_MESSAGE_SIZE`].
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
+        self.encode_for_network(PUBLIC_NETWORK_ID)
+    }
+
+    /// Encodes this message with the configured network identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] if a field is invalid or the encoded message
+    /// exceeds [`MAX_MESSAGE_SIZE`].
+    pub fn encode_for_network(&self, network_id: NetworkId) -> Result<Vec<u8>, ProtocolError> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
         bytes.push(VERSION);
+        bytes.extend_from_slice(network_id.as_bytes());
         match self {
             Self::FindNode {
                 request_id,
@@ -241,24 +263,24 @@ impl ApplicationMessage {
             Self::ObservedAddress { nonce, endpoint } => {
                 bytes.push(OBSERVED_ADDRESS);
                 bytes.extend_from_slice(nonce);
-                match endpoint.ip() {
-                    IpAddr::V4(address) => {
+                match endpoint {
+                    SocketAddr::V4(endpoint) => {
                         bytes.push(4);
-                        bytes.extend_from_slice(&address.octets());
+                        bytes.extend_from_slice(&endpoint.ip().octets());
                     }
-                    IpAddr::V6(address) => {
+                    SocketAddr::V6(endpoint) => {
+                        if endpoint.scope_id() != 0 || endpoint.flowinfo() != 0 {
+                            return Err(ProtocolError::InvalidField);
+                        }
                         bytes.push(6);
-                        bytes.extend_from_slice(&address.octets());
+                        bytes.extend_from_slice(&endpoint.ip().octets());
                     }
                 }
                 bytes.extend_from_slice(&endpoint.port().to_be_bytes());
             }
             Self::DirectVote { vote } => {
                 bytes.push(DIRECT_VOTE);
-                let length =
-                    u32::try_from(vote.len()).map_err(|_| ProtocolError::MessageTooLarge)?;
-                bytes.extend_from_slice(&length.to_be_bytes());
-                bytes.extend_from_slice(vote);
+                append_payload(&mut bytes, vote)?;
             }
             Self::Error { code } => {
                 bytes.push(ERROR_RESPONSE);
@@ -307,6 +329,19 @@ impl ApplicationMessage {
     ///
     /// Returns [`ProtocolError`] for malformed, unsupported, or oversized input.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        Self::decode_for_network(bytes, PUBLIC_NETWORK_ID)
+    }
+
+    /// Decodes a message only when it is bound to the expected network.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError`] for malformed, unsupported, oversized, or
+    /// wrong-network input.
+    pub fn decode_for_network(
+        bytes: &[u8],
+        expected_network_id: NetworkId,
+    ) -> Result<Self, ProtocolError> {
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(ProtocolError::MessageTooLarge);
         }
@@ -320,7 +355,14 @@ impl ApplicationMessage {
         if version != VERSION {
             return Err(ProtocolError::UnsupportedVersion(version));
         }
-        let tag = *bytes.get(4).ok_or(ProtocolError::Truncated)?;
+        if bytes.get(MAGIC.len() + 1..MESSAGE_TAG_OFFSET)
+            != Some(expected_network_id.as_bytes().as_slice())
+        {
+            return Err(ProtocolError::NetworkMismatch);
+        }
+        let tag = *bytes
+            .get(MESSAGE_TAG_OFFSET)
+            .ok_or(ProtocolError::Truncated)?;
         let mut decoder = Decoder {
             bytes,
             position: HEADER_LEN,
@@ -414,7 +456,12 @@ impl ApplicationMessage {
 
 fn append_payload(bytes: &mut Vec<u8>, payload: &[u8]) -> Result<(), ProtocolError> {
     let length = u32::try_from(payload.len()).map_err(|_| ProtocolError::MessageTooLarge)?;
-    if payload.len() > MAX_MESSAGE_SIZE {
+    if payload
+        .len()
+        .checked_add(bytes.len())
+        .and_then(|length| length.checked_add(size_of::<u32>()))
+        .is_none_or(|length| length > MAX_MESSAGE_SIZE)
+    {
         return Err(ProtocolError::MessageTooLarge);
     }
     bytes.extend_from_slice(&length.to_be_bytes());
@@ -552,9 +599,11 @@ mod tests {
 
     use std::net::SocketAddr;
 
-    use populus_types::{ContentId, NetworkIdentity, NodeId, RoutingKey, UtcDay};
+    use populus_types::{ContentId, NetworkId, NetworkIdentity, NodeId, RoutingKey, UtcDay};
 
-    use super::{ApplicationErrorCode, ApplicationMessage, ProtocolError, RoutingContact};
+    use super::{
+        ApplicationErrorCode, ApplicationMessage, PUBLIC_NETWORK_ID, ProtocolError, RoutingContact,
+    };
 
     fn contact() -> RoutingContact {
         let identity =
@@ -565,6 +614,31 @@ mod tests {
             peer_id: vec![1, 2, 3],
             addresses: vec!["/ip4/8.8.8.8/tcp/4001".to_owned()],
         }
+    }
+
+    fn application_vector(message_name: &str) -> Option<Vec<u8>> {
+        let mut selected = false;
+        for line in include_str!("../../../testvectors/populus-application-v1.txt").lines() {
+            if let Some(name) = line.strip_prefix("message = ") {
+                selected = name == message_name;
+            } else if selected && let Some(encoded) = line.strip_prefix("encoded = ") {
+                let (pairs, remainder) = encoded.as_bytes().as_chunks::<2>();
+                assert!(
+                    remainder.is_empty(),
+                    "application vector must have even-length hex"
+                );
+                return Some(
+                    pairs
+                        .iter()
+                        .map(|pair| {
+                            u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII hex"), 16)
+                                .expect("valid hex byte")
+                        })
+                        .collect(),
+                );
+            }
+        }
+        None
     }
 
     #[test]
@@ -653,20 +727,78 @@ mod tests {
     }
 
     #[test]
+    fn observed_address_rejects_ipv6_socket_metadata_not_carried_on_wire() {
+        let endpoint = SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::1".parse().expect("IPv6 address"),
+            4001,
+            0,
+            2,
+        ));
+        assert_eq!(
+            ApplicationMessage::ObservedAddress {
+                nonce: [1; 16],
+                endpoint,
+            }
+            .encode(),
+            Err(ProtocolError::InvalidField)
+        );
+    }
+
+    #[test]
+    fn popularity_response_matches_independent_v1_vector() {
+        let response = ApplicationMessage::PopularityResponse {
+            response: vec![0xcc, 0xdd, 0xee],
+        };
+        let fixture = application_vector("PopularityResponse").expect("popularity vector exists");
+        assert_eq!(response.encode().expect("encode response"), fixture);
+        assert_eq!(
+            ApplicationMessage::decode(&fixture).expect("decode response fixture"),
+            response
+        );
+    }
+
+    #[test]
+    fn application_messages_are_bound_to_the_expected_network() {
+        let message = ApplicationMessage::RequestObservedAddress { nonce: [4; 16] };
+        let other_network = NetworkId::from_bytes([0x42; 32]);
+        let encoded = message
+            .encode_for_network(other_network)
+            .expect("encode on alternate network");
+        assert_eq!(
+            ApplicationMessage::decode_for_network(&encoded, other_network),
+            Ok(message)
+        );
+        assert_eq!(
+            ApplicationMessage::decode_for_network(&encoded, PUBLIC_NETWORK_ID),
+            Err(ProtocolError::NetworkMismatch)
+        );
+    }
+
+    #[test]
     fn delegated_ingest_envelopes_match_golden_vectors() {
         let report = ApplicationMessage::DelegatedIngestReport {
             report: vec![0x11, 0x22],
         };
+        let report_fixture =
+            application_vector("DelegatedIngestReport").expect("report vector exists");
+        assert_eq!(report.encode().expect("encode report"), report_fixture);
         assert_eq!(
-            report.encode().expect("encode report"),
-            b"POP\x01\x0a\x00\x00\x00\x02\x11\x22"
+            ApplicationMessage::decode(&report_fixture).expect("decode report fixture"),
+            report
         );
         let acknowledgement = ApplicationMessage::DelegatedIngestAck {
             acknowledgement: vec![0x33, 0x44],
         };
+        let acknowledgement_fixture =
+            application_vector("DelegatedIngestAck").expect("delegated ACK vector exists");
         assert_eq!(
             acknowledgement.encode().expect("encode acknowledgement"),
-            b"POP\x01\x0b\x00\x00\x00\x02\x33\x44"
+            acknowledgement_fixture
+        );
+        assert_eq!(
+            ApplicationMessage::decode(&acknowledgement_fixture)
+                .expect("decode acknowledgement fixture"),
+            acknowledgement
         );
     }
 
@@ -675,25 +807,39 @@ mod tests {
         let registration = ApplicationMessage::CandidateRegistration {
             registration: vec![0x55, 0x66],
         };
+        let registration_fixture =
+            application_vector("CandidateRegistration").expect("registration vector exists");
         assert_eq!(
             registration.encode().expect("encode registration"),
-            b"POP\x01\x0c\x00\x00\x00\x02\x55\x66"
+            registration_fixture
+        );
+        assert_eq!(
+            ApplicationMessage::decode(&registration_fixture).expect("decode registration fixture"),
+            registration
         );
         let acknowledgement = ApplicationMessage::CandidateRegistrationAck {
             registration_hash: [0x88; 32],
         };
-        let mut expected = b"POP\x01\x0d".to_vec();
-        expected.extend_from_slice(&[0x88; 32]);
+        let acknowledgement_fixture =
+            application_vector("CandidateRegistrationAck").expect("registration ACK vector exists");
         assert_eq!(
             acknowledgement.encode().expect("encode acknowledgement"),
-            expected
+            acknowledgement_fixture
+        );
+        assert_eq!(
+            ApplicationMessage::decode(&acknowledgement_fixture)
+                .expect("decode registration acknowledgement fixture"),
+            acknowledgement
         );
     }
 
     #[test]
     fn malformed_versions_and_bounds_are_rejected() {
+        let mut unsupported_version =
+            [b"POP\x02".as_slice(), PUBLIC_NETWORK_ID.as_bytes()].concat();
+        unsupported_version.push(super::FIND_NODE);
         assert_eq!(
-            ApplicationMessage::decode(b"POP\x02\x03"),
+            ApplicationMessage::decode(&unsupported_version),
             Err(ProtocolError::UnsupportedVersion(2))
         );
         let mut message = ApplicationMessage::FindNode {
@@ -750,8 +896,11 @@ mod tests {
         assert_eq!(
             message.encode().expect("encode"),
             [
-                b'P', b'O', b'P', 1, 3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+                b"POP\x01".as_slice(),
+                PUBLIC_NETWORK_ID.as_bytes(),
+                &[3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
             ]
+            .concat()
         );
     }
 
@@ -762,7 +911,12 @@ mod tests {
         };
         assert_eq!(
             message.encode().expect("encode"),
-            [b'P', b'O', b'P', 1, 5, 0, 0, 0, 4, 0xde, 0xad, 0xbe, 0xef,]
+            [
+                b"POP\x01".as_slice(),
+                PUBLIC_NETWORK_ID.as_bytes(),
+                &[5, 0, 0, 0, 4, 0xde, 0xad, 0xbe, 0xef],
+            ]
+            .concat()
         );
     }
 }

@@ -265,7 +265,9 @@ impl IdentityManager {
         {
             return Err(IdentityManagerError::ResourceLimit);
         }
-        state.lifecycle = IdentityLifecycle::Verifying;
+        if state.lifecycle == IdentityLifecycle::Discovered {
+            state.lifecycle = IdentityLifecycle::Verifying;
+        }
         state.challenges.insert(
             verifier,
             Challenge {
@@ -304,7 +306,7 @@ impl IdentityManager {
             .identities
             .get_mut(&identity)
             .ok_or(IdentityManagerError::StaleChallenge)?;
-        let Some(expected) = state.challenges.remove(&verifier) else {
+        let Some(expected) = state.challenges.get(&verifier).copied() else {
             return Err(IdentityManagerError::StaleChallenge);
         };
         if expected.nonce != challenge || expected.expires_at_ms <= now_ms {
@@ -317,6 +319,7 @@ impl IdentityManager {
         {
             return Err(IdentityManagerError::InvalidVerification);
         }
+        state.challenges.remove(&verifier);
         state.verifications.insert(
             verifier,
             Verification {
@@ -346,7 +349,9 @@ impl IdentityManager {
         let already_active = self.identities.get(&identity).is_some_and(|state| {
             matches!(
                 state.lifecycle,
-                IdentityLifecycle::Active | IdentityLifecycle::Suspect
+                IdentityLifecycle::Active
+                    | IdentityLifecycle::Suspect
+                    | IdentityLifecycle::Retiring
             )
         });
         let active_count = self.active_count();
@@ -354,6 +359,9 @@ impl IdentityManager {
             .identities
             .get_mut(&identity)
             .ok_or(IdentityManagerError::InsufficientVerifications)?;
+        if state.lifecycle == IdentityLifecycle::Retiring {
+            return Err(IdentityManagerError::InvalidTransition);
+        }
         if state.verifications.len() < self.config.verification_quorum {
             return Err(IdentityManagerError::InsufficientVerifications);
         }
@@ -365,79 +373,6 @@ impl IdentityManager {
         Ok(node_id(&identity))
     }
 
-    /// Activates a manifest identity after the genesis observation quorum is met.
-    ///
-    /// This is crate-private so only the signed-manifest runtime adapter can
-    /// authorize the genesis transition.
-    pub(crate) fn activate_manifest_member(
-        &mut self,
-        identity: NetworkIdentity,
-        now_ms: u64,
-    ) -> Result<NodeId, IdentityManagerError> {
-        self.expire(now_ms);
-        let already_active = self.identities.get(&identity).is_some_and(|state| {
-            matches!(
-                state.lifecycle,
-                IdentityLifecycle::Active | IdentityLifecycle::Suspect
-            )
-        });
-        if self
-            .identities
-            .get(&identity)
-            .is_none_or(|state| state.lifecycle != IdentityLifecycle::Discovered)
-        {
-            return Err(IdentityManagerError::InsufficientObservations);
-        }
-        if !already_active && self.active_count() >= self.config.max_active_nodes {
-            return Err(IdentityManagerError::ActiveNodeLimit);
-        }
-        self.identities
-            .get_mut(&identity)
-            .ok_or(IdentityManagerError::InsufficientObservations)?
-            .lifecycle = IdentityLifecycle::Active;
-        Ok(node_id(&identity))
-    }
-
-    /// Activates a discovered identity only after its ownership certificate
-    /// has already passed the exact verifier-committee quorum checks.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`IdentityManagerError::InsufficientObservations`] when local
-    /// discovery has not independently observed the identity, or
-    /// [`IdentityManagerError::ActiveNodeLimit`] when local capacity is full.
-    pub(crate) fn activate_certified_binding(
-        &mut self,
-        identity: NetworkIdentity,
-        now_ms: u64,
-    ) -> Result<NodeId, IdentityManagerError> {
-        self.expire(now_ms);
-        let already_active = self.identities.get(&identity).is_some_and(|state| {
-            matches!(
-                state.lifecycle,
-                IdentityLifecycle::Active | IdentityLifecycle::Suspect
-            )
-        });
-        if !self.identities.get(&identity).is_some_and(|state| {
-            matches!(
-                state.lifecycle,
-                IdentityLifecycle::Discovered
-                    | IdentityLifecycle::Active
-                    | IdentityLifecycle::Suspect
-            )
-        }) {
-            return Err(IdentityManagerError::InsufficientObservations);
-        }
-        if !already_active && self.active_count() >= self.config.max_active_nodes {
-            return Err(IdentityManagerError::ActiveNodeLimit);
-        }
-        self.identities
-            .get_mut(&identity)
-            .ok_or(IdentityManagerError::InsufficientObservations)?
-            .lifecycle = IdentityLifecycle::Active;
-        Ok(node_id(&identity))
-    }
-
     /// Test-only bypass for isolated unit and localhost fixtures.
     ///
     /// # Errors
@@ -446,7 +381,7 @@ impl IdentityManager {
     /// exhausted, or [`IdentityManagerError::ResourceLimit`] when tracking is
     /// full.
     #[cfg(test)]
-    pub fn activate_genesis(
+    pub fn activate_test_identity(
         &mut self,
         identity: NetworkIdentity,
     ) -> Result<NodeId, IdentityManagerError> {
@@ -577,7 +512,9 @@ impl IdentityManager {
             .filter(|state| {
                 matches!(
                     state.lifecycle,
-                    IdentityLifecycle::Active | IdentityLifecycle::Suspect
+                    IdentityLifecycle::Active
+                        | IdentityLifecycle::Suspect
+                        | IdentityLifecycle::Retiring
                 )
             })
             .count()
@@ -598,6 +535,9 @@ impl IdentityManager {
 
     fn expire(&mut self, now_ms: u64) {
         for state in self.identities.values_mut() {
+            if state.lifecycle == IdentityLifecycle::Retiring {
+                continue;
+            }
             state
                 .observers
                 .retain(|_, observation| observation.expires_at_ms > now_ms);
@@ -626,11 +566,10 @@ impl IdentityManager {
             }
         }
         self.identities.retain(|_, state| {
-            !matches!(
-                state.lifecycle,
-                IdentityLifecycle::Unknown | IdentityLifecycle::Retiring
-            ) || !state.observers.is_empty()
+            !matches!(state.lifecycle, IdentityLifecycle::Unknown)
+                || !state.observers.is_empty()
                 || !state.verifications.is_empty()
+                || state.lifecycle == IdentityLifecycle::Retiring
         });
     }
 }
@@ -929,6 +868,7 @@ mod tests {
         manager.mark_suspect(network_identity).expect("suspect");
         manager.restore(network_identity, 3).expect("restore");
         manager.retire(network_identity).expect("retire");
+        assert_eq!(manager.active_count(), 1);
         manager.remove(network_identity).expect("remove");
         assert_eq!(manager.active_count(), 0);
     }
@@ -968,6 +908,105 @@ mod tests {
             ),
             Err(IdentityManagerError::StaleChallenge)
         );
+    }
+
+    #[test]
+    fn invalid_verification_does_not_consume_a_valid_challenge() {
+        let local_peer = peer();
+        let mut manager =
+            IdentityManager::new(local_peer, IdentityManagerConfig::default()).expect("manager");
+        let network_identity = identity("8.8.8.8");
+        for index in 1..=3 {
+            manager
+                .observe(
+                    observer(index),
+                    [index; 16],
+                    [index; 16],
+                    endpoint("8.8.8.8"),
+                    true,
+                    1,
+                )
+                .expect("observation");
+        }
+        let verifier = observer(1);
+        let challenge = [9; 16];
+        manager
+            .begin_verification(network_identity, verifier, challenge, 2)
+            .expect("begin verification");
+
+        assert_eq!(
+            manager.record_verification(
+                network_identity,
+                verifier,
+                [8; 16],
+                local_peer,
+                true,
+                true,
+                100,
+                3,
+            ),
+            Err(IdentityManagerError::StaleChallenge)
+        );
+        manager
+            .record_verification(
+                network_identity,
+                verifier,
+                challenge,
+                local_peer,
+                true,
+                true,
+                100,
+                3,
+            )
+            .expect("correct retry remains valid");
+    }
+
+    #[test]
+    fn refreshing_active_identity_keeps_it_active() {
+        let local_peer = peer();
+        let mut manager =
+            IdentityManager::new(local_peer, IdentityManagerConfig::default()).expect("manager");
+        let network_identity = identity("8.8.8.8");
+        for index in 1..=3 {
+            manager
+                .observe(
+                    observer(index),
+                    [index; 16],
+                    [index; 16],
+                    endpoint("8.8.8.8"),
+                    true,
+                    1,
+                )
+                .expect("observation");
+        }
+        for index in 1..=3 {
+            manager
+                .begin_verification(network_identity, observer(index), [index; 16], 2)
+                .expect("begin verification");
+            manager
+                .record_verification(
+                    network_identity,
+                    observer(index),
+                    [index; 16],
+                    local_peer,
+                    true,
+                    true,
+                    100,
+                    2,
+                )
+                .expect("verification");
+        }
+        manager
+            .activate(network_identity, 3)
+            .expect("activate identity");
+        manager
+            .begin_verification(network_identity, observer(1), [7; 16], 4)
+            .expect("refresh challenge");
+        assert_eq!(
+            manager.lifecycle(&network_identity),
+            IdentityLifecycle::Active
+        );
+        assert_eq!(manager.active_count(), 1);
     }
 
     #[test]
@@ -1024,12 +1063,12 @@ mod tests {
     }
 
     #[test]
-    fn test_only_genesis_activation_bypasses_verification() {
+    fn test_only_identity_eligibility_bypasses_verification() {
         let identity = identity("8.8.8.8");
         let mut test_network =
             IdentityManager::new(peer(), IdentityManagerConfig::default()).expect("manager");
         assert_eq!(
-            test_network.activate_genesis(identity),
+            test_network.activate_test_identity(identity),
             Ok(populus_crypto::node_id(&identity))
         );
     }

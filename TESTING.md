@@ -96,20 +96,24 @@ malice
 load
 ```
 
-Identity simulations use the same `IdentityManager` transition logic as
-`populus-node`, advance supplied virtual timestamps without sleeping, and
-use seeded libp2p test keys. They cover distinct-observer thresholds,
-nonce correlation, IPv6 `/48` normalization, and evidence expiration.
-Cluster ownership unit tests additionally cover network-scoped bounded
-candidate shards, multiple `PeerId`s for one `NodeId`, deterministic
-committee transitions, exact-committee quorum votes, non-equivocation,
-certificate context, and incumbent lease retention. The simulator also
-exercises a two-of-four ownership partition, verifies that it cannot displace
-the incumbent, then applies a quorum-backed standby only after lease expiry.
-This is a deterministic state-machine scenario, not a full distributed
-ownership simulation: message reordering, malicious membership snapshots,
-multi-process certificate exchange, candidate discovery, and authority
-recovery remain untested.
+Identity tests use the same `IdentityManager` transition logic as
+`populus-node`, advance supplied virtual timestamps without sleeping, and use
+seeded libp2p test keys. They cover distinct observer `NodeId`s, nonce
+correlation, IPv6 `/48` normalization, and evidence expiration. Focused
+ownership tests must cover network-scoped candidate shards, multiple
+`PeerId`s for one `NodeId`, stale sequence rejection after record expiry,
+signed evidence bound to the exact candidate and challenge, conflicting
+ownership assertions, incumbent retention, and disputed-state exclusion.
+
+Permissionless simulations must not model a genesis root or globally
+certified committee. They should form separate neighborhoods independently,
+exchange peer and ownership evidence after connectivity returns, and verify
+that routing-table merging alone does not clear contradictory authority state.
+Exercise message loss, duplication, reordering, stale leases, clock skew,
+identity changes, restart revalidation, candidate discovery, and authority /
+ingest behavior while an identity is disputed or retiring. Existing
+committee-chain and two-of-four partition scenarios describe the superseded
+design and are not acceptance evidence for Phase 11.5.
 
 ## Level 5: localhost network tests
 

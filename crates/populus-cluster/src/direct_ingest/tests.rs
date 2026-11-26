@@ -68,6 +68,18 @@ fn signed_ack(
     SignedDirectVoteAck::sign(vote, membership, key).expect("member can sign its vote ack")
 }
 
+fn hex_bytes(value: &str) -> Vec<u8> {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    assert!(remainder.is_empty(), "hex vector must have an even length");
+    pairs
+        .iter()
+        .map(|pair| {
+            u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII hex"), 16)
+                .expect("valid hex byte")
+        })
+        .collect()
+}
+
 #[test]
 fn popularity_response_round_trips_and_binds_the_membership_generation() {
     let content_id = content(9);
@@ -81,6 +93,11 @@ fn popularity_response_round_trips_and_binds_the_membership_generation() {
     let response =
         SignedPopularityResponse::sign(content_id, day, &membership, 123.5, false, signer)
             .expect("current member signs popularity");
+    let expected_hex = include_str!("../../../../testvectors/popularity-response-v1.txt")
+        .lines()
+        .find_map(|line| line.strip_prefix("encoded = "))
+        .expect("popularity vector has encoded bytes");
+    assert_eq!(response.canonical_bytes(), hex_bytes(expected_hex));
     let decoded = SignedPopularityResponse::deserialize(&response.canonical_bytes())
         .expect("canonical response decodes");
     decoded

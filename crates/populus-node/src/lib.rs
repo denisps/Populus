@@ -15,16 +15,16 @@ pub use identity::{
 
 pub use libp2p::{Multiaddr, PeerId};
 pub use persistence::{
-    FileOwnershipVoteJournal, FilePeerIdentityStore, PeerIdentityError, PeerIdentityStore,
-    load_or_create_peer_identity,
+    FilePeerIdentityStore, PeerIdentityError, PeerIdentityStore, load_or_create_peer_identity,
 };
 pub use populus_network::{RequestId, ResponseChannel, SendRequestError, SendResponseError};
 pub use populus_protocol::{
     ApplicationErrorCode, ApplicationMessage, ProtocolError, RoutingContact,
 };
-pub use populus_types::NetworkIdentity;
+pub use populus_types::{NetworkId, NetworkIdentity};
 pub use process::{
-    ApplicationResponseError, LogicalNode, PopulusProcess, ProcessError, ProcessEvent,
+    ApplicationResponseError, CandidateRegistrationPublicationError, LogicalNode, PopulusProcess,
+    ProcessError, ProcessEvent,
 };
 
 /// A malformed direct-vote payload rejected by the existing canonical decoder.
@@ -215,16 +215,19 @@ impl Node {
         self.transport.send_response(channel, response)
     }
 
-    /// Waits for the next event, decoding every inbound request as a direct vote.
+    /// Waits for the next event and decodes inbound application requests.
     ///
-    /// Invalid requests are returned as [`NodeEvent::DirectVoteRequest`] with a
-    /// typed [`DirectVoteRejection`]; they are never presented as successful votes.
+    /// Envelope-decoding failures return [`NodeEvent::InvalidApplicationRequest`].
+    /// Valid envelopes containing malformed vote bytes return
+    /// [`NodeEvent::DirectVoteRequest`] with a typed [`DirectVoteRejection`].
+    /// Callers must handle both events; neither represents an accepted vote.
     pub async fn next_event(&mut self) -> NodeEvent {
         match self.transport.next_event().await {
             TransportEvent::Request {
                 peer,
                 request,
                 channel,
+                ..
             } => match ApplicationMessage::decode(&request) {
                 Ok(ApplicationMessage::DirectVote { vote }) => NodeEvent::DirectVoteRequest {
                     peer,

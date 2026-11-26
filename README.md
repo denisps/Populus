@@ -17,15 +17,19 @@ cargo run -p populus-node -- run \
 ```
 
 Use `--identity-key PATH`, repeat `--listen` or `--bootstrap`, and configure
-`--max-node-ids N` (default 4) as needed. A simple key/value config file is
-also accepted with `--config FILE`; supported keys are `listen`, `bootstrap`,
-`identity_key`, `max_node_ids`, and `genesis_identity` (repeat `listen` and
-`bootstrap` for multiple values). The explicit `--genesis-identity PUBLIC-IP`
-option bypasses observation and verification and is for isolated test
-networks only.
+`--max-node-ids N` (default 4) as needed. `--network-id HEX` selects the one
+network this process joins; by default it uses the public Populus network ID,
+SHA-256 of `populus/public-network/v1`. A key/value config file is also
+accepted with `--config FILE`; supported keys are `listen`, `bootstrap`,
+`identity_key`, `max_node_ids`, and `network_id` (repeat `listen` and
+`bootstrap` for multiple values). Network IDs do not authorize membership.
+Nodes may start provisionally without bootstrap peers or genesis configuration.
 
-The current runtime supports transport bootstrap, bounded contact discovery,
-nonce-correlated address observations, and local identity lifecycle hooks.
-It does not yet implement quorum-backed NodeID ownership arbitration or the
-authority/delegated-ingest network protocol. In particular, receiving a direct
-vote without an active authority is refused, not reported as counted.
+The runtime supports transport bootstrap, bounded contact discovery,
+nonce-correlated address observations, signed candidate registration
+messages, and adapters to the existing direct and delegated ingest state
+machines. Authority membership is still caller-installed, and permissionless
+ownership conflict reconciliation, automatic lease renewal, and complete
+restart recovery are not implemented. A vote is reported as accepted only
+after an installed authority state machine accepts it; otherwise the process
+returns a typed refusal.

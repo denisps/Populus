@@ -246,10 +246,19 @@ pub enum TransportEvent {
     PeerConnected(libp2p::PeerId),
     /// A peer connection closed.
     PeerDisconnected(libp2p::PeerId),
+    /// An outbound connection attempt failed before establishing a peer.
+    DialFailed {
+        /// Target peer, when it could be derived from the dial address.
+        peer: Option<libp2p::PeerId>,
+        /// Failure description.
+        reason: String,
+    },
     /// An inbound request is ready for application processing.
     Request {
         /// The sending transport peer.
         peer: libp2p::PeerId,
+        /// Direct remote endpoint for the exact connection carrying this request.
+        remote_address: Option<Multiaddr>,
         /// The request payload.
         request: Vec<u8>,
         /// Capability used to return the response.
@@ -286,6 +295,7 @@ pub enum TransportEvent {
 pub struct Transport {
     swarm: Swarm<Behaviour>,
     remote_addresses: HashMap<libp2p::PeerId, Vec<Multiaddr>>,
+    connection_endpoints: HashMap<libp2p::swarm::ConnectionId, (libp2p::PeerId, Multiaddr, bool)>,
     connected_peers: HashSet<libp2p::PeerId>,
     direct_connection_counts: HashMap<libp2p::PeerId, u32>,
     active_requests: HashMap<request_response::OutboundRequestId, RequestId>,
@@ -315,6 +325,7 @@ impl Transport {
         Ok(Self {
             swarm: build_swarm(identity)?,
             remote_addresses: HashMap::new(),
+            connection_endpoints: HashMap::new(),
             connected_peers: HashSet::new(),
             direct_connection_counts: HashMap::new(),
             active_requests: HashMap::new(),
@@ -483,57 +494,59 @@ impl Transport {
                 libp2p::swarm::SwarmEvent::ConnectionEstablished {
                     peer_id,
                     endpoint,
+                    connection_id,
                     num_established,
                     ..
                 } => {
-                    let addresses = self.remote_addresses.entry(peer_id).or_default();
                     let address = endpoint.get_remote_address().clone();
-                    if !addresses.contains(&address) && addresses.len() < 8 {
-                        addresses.push(address);
-                    }
-                    if !endpoint.is_relayed() {
-                        let count = self.direct_connection_counts.entry(peer_id).or_default();
-                        *count = count.saturating_add(1);
-                    }
-                    if num_established.get() == 1 {
-                        self.connected_peers.insert(peer_id);
-                        return TransportEvent::PeerConnected(peer_id);
+                    let is_direct = !endpoint.is_relayed();
+                    if let Some(event) = self.connection_established(
+                        peer_id,
+                        connection_id,
+                        address,
+                        is_direct,
+                        num_established.get(),
+                    ) {
+                        return event;
                     }
                 }
                 libp2p::swarm::SwarmEvent::ConnectionClosed {
                     peer_id,
-                    endpoint,
+                    connection_id,
                     num_established,
                     ..
                 } => {
-                    if !endpoint.is_relayed() {
-                        let remove_direct = self
-                            .direct_connection_counts
-                            .get_mut(&peer_id)
-                            .is_some_and(|count| {
-                                *count = count.saturating_sub(1);
-                                *count == 0
-                            });
-                        if remove_direct {
-                            self.direct_connection_counts.remove(&peer_id);
-                        }
-                    }
-                    if num_established == 0 {
-                        self.fail_queued_for(peer_id);
-                        self.remote_addresses.remove(&peer_id);
-                        self.connected_peers.remove(&peer_id);
-                        self.direct_connection_counts.remove(&peer_id);
-                        return TransportEvent::PeerDisconnected(peer_id);
+                    if let Some(event) =
+                        self.connection_closed(peer_id, connection_id, num_established)
+                    {
+                        return event;
                     }
                 }
+                libp2p::swarm::SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                    return TransportEvent::DialFailed {
+                        peer: peer_id,
+                        reason: error.to_string(),
+                    };
+                }
                 libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::Requests(
-                    request_response::Event::Message { peer, message, .. },
+                    request_response::Event::Message {
+                        peer,
+                        connection_id,
+                        message,
+                    },
                 )) => match message {
                     request_response::Message::Request {
                         request, channel, ..
                     } => {
                         return TransportEvent::Request {
                             peer,
+                            remote_address: self
+                                .connection_endpoints
+                                .get(&connection_id)
+                                .filter(|(connected_peer, _, direct)| {
+                                    *connected_peer == peer && *direct
+                                })
+                                .map(|(_, address, _)| address.clone()),
                             request,
                             channel: ResponseChannel(channel),
                         };
@@ -580,6 +593,75 @@ impl Transport {
                 _ => {}
             }
         }
+    }
+
+    fn connection_established(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+        address: Multiaddr,
+        is_direct: bool,
+        num_established: u32,
+    ) -> Option<TransportEvent> {
+        let addresses = self.remote_addresses.entry(peer_id).or_default();
+        self.connection_endpoints
+            .insert(connection_id, (peer_id, address.clone(), is_direct));
+        if !addresses.contains(&address) && addresses.len() < 8 {
+            addresses.push(address);
+        }
+        if is_direct {
+            let count = self.direct_connection_counts.entry(peer_id).or_default();
+            *count = count.saturating_add(1);
+        }
+        if num_established == 1 {
+            self.connected_peers.insert(peer_id);
+            return Some(TransportEvent::PeerConnected(peer_id));
+        }
+        None
+    }
+
+    fn connection_closed(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+        num_established: u32,
+    ) -> Option<TransportEvent> {
+        let closed_connection = self.connection_endpoints.remove(&connection_id);
+        let was_direct = closed_connection.is_some_and(|(_, _, direct)| direct);
+        let mut addresses = self
+            .connection_endpoints
+            .values()
+            .filter(|(connected_peer, _, _)| *connected_peer == peer_id)
+            .map(|(_, address, _)| address.clone())
+            .collect::<Vec<_>>();
+        addresses.sort_unstable_by_key(ToString::to_string);
+        addresses.dedup();
+        addresses.truncate(8);
+        if addresses.is_empty() {
+            self.remote_addresses.remove(&peer_id);
+        } else {
+            self.remote_addresses.insert(peer_id, addresses);
+        }
+        if was_direct {
+            let remove_direct =
+                self.direct_connection_counts
+                    .get_mut(&peer_id)
+                    .is_some_and(|count| {
+                        *count = count.saturating_sub(1);
+                        *count == 0
+                    });
+            if remove_direct {
+                self.direct_connection_counts.remove(&peer_id);
+            }
+        }
+        if num_established == 0 {
+            self.fail_queued_for(peer_id);
+            self.remote_addresses.remove(&peer_id);
+            self.connected_peers.remove(&peer_id);
+            self.direct_connection_counts.remove(&peer_id);
+            return Some(TransportEvent::PeerDisconnected(peer_id));
+        }
+        None
     }
 
     fn dispatch(&mut self, request: PendingRequest) {
@@ -889,7 +971,21 @@ mod tests {
             loop {
                 tokio::select! {
                     event = server.next_event() => {
-                        if let super::TransportEvent::Request { request, channel, .. } = event {
+                        if let super::TransportEvent::Request {
+                            request,
+                            channel,
+                            remote_address,
+                            ..
+                        } = event
+                        {
+                            let remote_address = remote_address.expect("direct endpoint available");
+                            assert!(remote_address.iter().any(|protocol| matches!(
+                                protocol,
+                                Protocol::Ip4(address) if address.is_loopback()
+                            )));
+                            assert!(remote_address.iter().any(|protocol| {
+                                matches!(protocol, Protocol::Tcp(_))
+                            }));
                             server.send_response(channel, request).expect("response channel open");
                         }
                     }

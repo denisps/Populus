@@ -2,12 +2,13 @@
 
 use std::{path::PathBuf, process::ExitCode};
 
-use populus_cluster::GenesisManifest;
 use populus_network::parse_multiaddr;
 use populus_node::{
     ApplicationErrorCode, ApplicationMessage, FilePeerIdentityStore, IdentityManagerConfig,
     PopulusProcess, ProcessEvent,
 };
+use populus_protocol::PUBLIC_NETWORK_ID;
+use populus_types::NetworkId;
 use tracing::{Level, error, info, warn};
 
 const DEFAULT_LISTEN: &str = "/ip4/0.0.0.0/tcp/4001";
@@ -20,8 +21,7 @@ struct RunOptions {
     bootstrap_addresses: Vec<String>,
     identity_key_path: PathBuf,
     max_node_ids: usize,
-    genesis_manifest_path: Option<PathBuf>,
-    genesis_trust_key_path: Option<PathBuf>,
+    network_id: NetworkId,
 }
 
 impl Default for RunOptions {
@@ -31,8 +31,7 @@ impl Default for RunOptions {
             bootstrap_addresses: Vec::new(),
             identity_key_path: PathBuf::from(DEFAULT_IDENTITY_PATH),
             max_node_ids: 4,
-            genesis_manifest_path: None,
-            genesis_trust_key_path: None,
+            network_id: PUBLIC_NETWORK_ID,
         }
     }
 }
@@ -79,22 +78,31 @@ async fn main() -> ExitCode {
 
 fn print_usage() {
     eprintln!(
-        "Usage: populus-node run [--config FILE] [--listen MULTIADDR] \
+        "Usage: populus-node run [--config FILE] [--network-id HEX] [--listen MULTIADDR] \
          [--bootstrap MULTIADDR] [--identity-key FILE] [--max-node-ids N] \
-         [--genesis-manifest FILE --genesis-trust-key FILE]"
+         "
     );
     eprintln!("Defaults: listen on {DEFAULT_LISTEN}; persist PeerId in {DEFAULT_IDENTITY_PATH}.");
-    eprintln!(
-        "Genesis requires a signed four-member manifest and an out-of-band raw 32-byte trust key."
-    );
+    eprintln!("The default network ID is the fixed public Populus network.");
 }
 
 fn parse_options(arguments: &[String]) -> Result<RunOptions, String> {
     let mut options = RunOptions::default();
-    let config_path = arguments
-        .windows(2)
-        .find(|pair| pair[0] == "--config")
-        .map(|pair| PathBuf::from(&pair[1]));
+    let mut config_path = None;
+    let mut config_index = 0;
+    while config_index < arguments.len() {
+        if arguments[config_index] == "--config" {
+            let Some(path) = arguments.get(config_index + 1) else {
+                return Err("missing value for --config".to_owned());
+            };
+            if config_path.replace(PathBuf::from(path)).is_some() {
+                return Err("--config may be supplied only once".to_owned());
+            }
+            config_index += 2;
+        } else {
+            config_index += 1;
+        }
+    }
     if let Some(path) = config_path {
         parse_config_file(&path, &mut options)?;
     }
@@ -129,19 +137,13 @@ fn parse_options(arguments: &[String]) -> Result<RunOptions, String> {
                     .parse()
                     .map_err(|_| "max-node-ids must be an integer".to_owned())?;
             }
-            "--genesis-manifest" => {
-                options.genesis_manifest_path = Some(PathBuf::from(value));
-            }
-            "--genesis-trust-key" => {
-                options.genesis_trust_key_path = Some(PathBuf::from(value));
+            "--network-id" => {
+                options.network_id = value.parse().map_err(|error| {
+                    format!("network-id must be 64 lowercase hex characters: {error}")
+                })?;
             }
             _ => return Err(format!("unknown option: {option}")),
         }
-    }
-    if options.genesis_manifest_path.is_some() != options.genesis_trust_key_path.is_some() {
-        return Err(
-            "--genesis-manifest and --genesis-trust-key must be supplied together".to_owned(),
-        );
     }
     if options.max_node_ids == 0 || options.max_node_ids > MAX_CONFIGURED_NODE_IDS {
         return Err(format!(
@@ -185,11 +187,13 @@ fn parse_config_file(path: &std::path::Path, options: &mut RunOptions) -> Result
                     format!("invalid max_node_ids on config line {}", line_index + 1)
                 })?;
             }
-            "genesis_manifest" => {
-                options.genesis_manifest_path = Some(PathBuf::from(value));
-            }
-            "genesis_trust_key" => {
-                options.genesis_trust_key_path = Some(PathBuf::from(value));
+            "network_id" => {
+                options.network_id = value.parse().map_err(|error| {
+                    format!(
+                        "invalid network_id on config line {}: {error}",
+                        line_index + 1
+                    )
+                })?;
             }
             _ => {
                 return Err(format!(
@@ -209,39 +213,13 @@ async fn run(options: RunOptions) -> Result<(), Box<dyn std::error::Error + Send
         ..IdentityManagerConfig::default()
     };
     let store = FilePeerIdentityStore::new(options.identity_key_path);
-    let mut process = PopulusProcess::with_identity_store(&store, identity_config)?;
+    let mut process = PopulusProcess::with_identity_store_and_network(
+        &store,
+        identity_config,
+        options.network_id,
+    )?;
     info!(peer_id = %process.peer_id(), "persistent Populus process identity loaded");
-    let genesis_addresses = match (
-        options.genesis_manifest_path,
-        options.genesis_trust_key_path,
-    ) {
-        (Some(manifest_path), Some(trust_key_path)) => {
-            let manifest_bytes = std::fs::read(&manifest_path)?;
-            let manifest = GenesisManifest::deserialize(&manifest_bytes)?;
-            let trust_key_bytes = std::fs::read(&trust_key_path)?;
-            let trusted_public_key: [u8; 32] =
-                trust_key_bytes.as_slice().try_into().map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "genesis trust-key file must contain exactly 32 raw bytes",
-                    )
-                })?;
-            let addresses = process.configure_genesis_manifest(manifest, trusted_public_key)?;
-            info!(
-                manifest = %manifest_path.display(),
-                "explicit signed genesis manifest loaded; awaiting direct-member quorum"
-            );
-            addresses
-        }
-        (None, None) => Vec::new(),
-        _ => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "--genesis-manifest and --genesis-trust-key must be supplied together",
-            )
-            .into());
-        }
-    };
+    info!(network_id = %process.network_id(), "configured Populus network");
 
     for address in options.listen_addresses {
         process.listen_on(parse_multiaddr(&address)?)?;
@@ -252,7 +230,7 @@ async fn run(options: RunOptions) -> Result<(), Box<dyn std::error::Error + Send
         .iter()
         .map(|address| parse_multiaddr(address))
         .collect::<Result<Vec<_>, _>>()?;
-    let bootstrap_count = process.bootstrap(bootstrap.into_iter().chain(genesis_addresses))?;
+    let bootstrap_count = process.bootstrap(bootstrap)?;
     info!(bootstrap_count, "bootstrap attempts started");
 
     loop {
@@ -263,9 +241,6 @@ async fn run(options: RunOptions) -> Result<(), Box<dyn std::error::Error + Send
                 break;
             }
             event = process.next_event() => {
-                if let Some(node_id) = process.try_activate_genesis_manifest()? {
-                    info!(%node_id, "signed genesis membership and direct observation quorum activated");
-                }
                 match event {
                     ProcessEvent::Transport(event) => info!(?event, "transport event"),
                     ProcessEvent::IdentityObservation { peer, results } => {
@@ -413,6 +388,7 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::parse_options;
+    use populus_protocol::PUBLIC_NETWORK_ID;
 
     #[test]
     fn command_line_overrides_defaults_and_repeated_values_are_supported() {
@@ -438,5 +414,17 @@ mod tests {
             let arguments = ["--max-node-ids".to_owned(), value.to_owned()];
             assert!(parse_options(&arguments).is_err());
         }
+    }
+
+    #[test]
+    fn network_id_defaults_to_public_and_config_option_requires_a_path() {
+        let defaults = parse_options(&[]).expect("defaults are valid");
+        assert_eq!(defaults.network_id, PUBLIC_NETWORK_ID);
+        assert!(
+            parse_options(&["--config".to_owned()])
+                .expect_err("missing config path is rejected")
+                .contains("missing value for --config")
+        );
+        assert!(parse_options(&["--network-id".to_owned(), "invalid".to_owned()]).is_err());
     }
 }

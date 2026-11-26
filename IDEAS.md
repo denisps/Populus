@@ -68,12 +68,12 @@
   in the Phase 16 scenarios before any v2 identity change. Over-merging is
   the accepted v1 cost; the open question is how often one account can buy
   multiple `/48`s.
-- Extend the bounded versioned application envelope with authority and
-  delegated-ingest message families only after their request/response
-  semantics, signatures, and mixed-version behavior are specified. The
-  current v1 envelope covers routing contacts, observed addresses, direct
-  votes, and typed errors; do not make those bytes implicit in transport
-  framing or reinterpret unknown tags as another message.
+- Keep the v1 envelope's wire contract explicit as message families evolve.
+  It currently covers routing, observations, direct votes and acknowledgements,
+  popularity, delegated-ingest reports and acknowledgements, candidate
+  registrations and acknowledgements, and typed errors. Any further message
+  addition or byte change needs a versioned compatibility decision, fixture,
+  and mixed-version behavior; unknown tags must never be reinterpreted.
 - Make direct-ingest acceptance policy consistent across an authority
   membership. Authorities currently persist their own grace and clock-skew
   settings, so mismatched configuration can make the same boundary-delayed
@@ -94,8 +94,8 @@
   contact state through the Phase 15 storage interfaces. Restore it only as
   expired/untrusted hints and require fresh reachability and ownership evidence
   before a saved contact or NodeID can re-enter eligible routing.
-- Bind a configured network identifier into the process and every relevant
-  protocol/signature context before supporting multiple isolated Populus
-  networks. Genesis manifests currently sign a network identifier, but the
-  runtime does not compare it with a separately configured value and ordinary
-  application messages do not establish network isolation.
+- After permissionless partition-and-merge simulations produce realistic
+  candidate-registry workloads, use their measured lookup, memory, and
+  replication costs to decide whether the fixed local shard and record bounds
+  need dynamic resizing. Do not turn a local storage cap into a network-wide
+  candidate limit.
