@@ -716,6 +716,29 @@ mod tests {
             ApplicationMessage::decode(&vote.encode().expect("encode")).expect("decode"),
             vote
         );
+
+        for (message, name) in [
+            (
+                ApplicationMessage::DirectVoteAck {
+                    acknowledgement: vec![0xaa, 0xbb],
+                },
+                "DirectVoteAck",
+            ),
+            (
+                ApplicationMessage::PopularityQuery {
+                    content_id: ContentId::from_digest([0; 32]),
+                    day: UtcDay::new(0),
+                },
+                "PopularityQuery",
+            ),
+        ] {
+            let fixture = application_vector(name).expect("application vector exists");
+            assert_eq!(message.encode().expect("encode"), fixture, "{name}");
+            assert_eq!(
+                ApplicationMessage::decode(&fixture).expect("decode fixture"),
+                message
+            );
+        }
     }
 
     #[test]
@@ -882,8 +905,10 @@ mod tests {
         let message = ApplicationMessage::Error {
             code: ApplicationErrorCode::NoActiveAuthority,
         };
+        let fixture = application_vector("Error").expect("error vector exists");
+        assert_eq!(message.encode().expect("encode"), fixture);
         assert_eq!(
-            ApplicationMessage::decode(&message.encode().expect("encode")).expect("decode"),
+            ApplicationMessage::decode(&fixture).expect("decode"),
             message
         );
     }
@@ -893,14 +918,12 @@ mod tests {
         let message = ApplicationMessage::RequestObservedAddress {
             nonce: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
         };
+        let fixture = application_vector("RequestObservedAddress")
+            .expect("observed-address request vector exists");
+        assert_eq!(message.encode().expect("encode"), fixture);
         assert_eq!(
-            message.encode().expect("encode"),
-            [
-                b"POP\x01".as_slice(),
-                PUBLIC_NETWORK_ID.as_bytes(),
-                &[3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-            ]
-            .concat()
+            ApplicationMessage::decode(&fixture).expect("decode fixture"),
+            message
         );
     }
 
@@ -909,14 +932,11 @@ mod tests {
         let message = ApplicationMessage::DirectVote {
             vote: [0xde, 0xad, 0xbe, 0xef].to_vec(),
         };
+        let fixture = application_vector("DirectVote").expect("direct-vote vector exists");
+        assert_eq!(message.encode().expect("encode"), fixture);
         assert_eq!(
-            message.encode().expect("encode"),
-            [
-                b"POP\x01".as_slice(),
-                PUBLIC_NETWORK_ID.as_bytes(),
-                &[5, 0, 0, 0, 4, 0xde, 0xad, 0xbe, 0xef],
-            ]
-            .concat()
+            ApplicationMessage::decode(&fixture).expect("decode fixture"),
+            message
         );
     }
 }
