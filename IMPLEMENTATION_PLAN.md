@@ -1189,6 +1189,14 @@ Property:
 for stable offered load, configuration eventually stabilizes
 ```
 
+The pure cluster controller consumes explicit virtual timestamps and up to
+three view-rate reports, smooths a bounded five-sample history, preserves the
+selected assignment algorithm, and quantizes candidate and reporting-interval
+changes. Its seeded simulator scenarios cover the required ramp/jump, collapse,
+threshold oscillation, missing/delayed reports, and single-view malicious
+outliers. The initial thresholds and interval buckets are engineering defaults;
+they remain tunable pending broader simulation evidence.
+
 ---
 
 # 17. Phase 12: outlier and Byzantine-report handling

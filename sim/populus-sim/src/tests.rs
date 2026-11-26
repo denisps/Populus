@@ -7,9 +7,10 @@ use super::{
     VIEW_COUNT, run_simulation,
 };
 use populus_cluster::{
-    AUTHORITY_COUNT, AssignmentAlgorithm, AuthorityMember, DelegatedIngestState,
-    DelegatedReportReceiver, DelegationDescriptor, IngestNode, IngestReport, MembershipView,
-    select_authorities,
+    AUTHORITY_COUNT, AssignmentAlgorithm, AuthorityMember, AuthorityMode,
+    DELEGATION_REPORT_INTERVALS_MS, DelegatedIngestState, DelegatedReportReceiver,
+    DelegationControlConfig, DelegationController, DelegationDescriptor, DelegationParameters,
+    DelegationRateSample, IngestNode, IngestReport, MembershipView, select_authorities,
 };
 use populus_crypto::{AuthorityKeypair, RoutingIdentifier, routing_key};
 use populus_sketch::ClientSketch;
@@ -874,6 +875,171 @@ fn delegated_view_reports_keep_inflated_and_suppressed_sketches_isolated() {
             assert_eq!(estimates, [0.0, 20.0, 20.0]);
         }
     }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn delegation_controller_stabilizes_across_load_shapes_and_report_faults() {
+    let direct = || {
+        DelegationParameters::new(
+            AuthorityMode::Direct,
+            0,
+            AssignmentAlgorithm::MatchBits,
+            0,
+            DELEGATION_REPORT_INTERVALS_MS[2],
+        )
+        .expect("valid direct control parameters")
+    };
+    let new_controller = |initial, dwell_ms| {
+        DelegationController::new(
+            DelegationControlConfig::new(1_000, dwell_ms).expect("positive target rate"),
+            initial,
+            0,
+        )
+    };
+    let sample = |at_ms, rates, per_node, candidates| {
+        DelegationRateSample::new(at_ms, rates, per_node, candidates)
+    };
+
+    let mut steady = new_controller(direct(), 0);
+    let mut stable_parameters = None;
+    for minute in 0..20 {
+        let decision = steady
+            .observe(sample(
+                minute * 60_000,
+                [Some(1_200); 3],
+                [Some(900); 3],
+                64,
+            ))
+            .expect("steady rate sample");
+        if minute >= 10 {
+            if let Some(previous) = stable_parameters {
+                assert_eq!(decision.parameters(), previous);
+            }
+            stable_parameters = Some(decision.parameters());
+        }
+    }
+    assert_eq!(
+        steady.parameters().mode(),
+        AuthorityMode::Delegated,
+        "stable offered load above direct capacity eventually delegates"
+    );
+
+    let mut slow_ramp = new_controller(direct(), 0);
+    for (sample_index, rate) in (1_000_u64..=5_000).step_by(1_000).enumerate() {
+        let candidate_count = slow_ramp.parameters().candidate_count().max(1);
+        let per_node_rate = rate
+            .saturating_mul(3)
+            .div_ceil(u64::try_from(candidate_count).expect("small candidate count"));
+        slow_ramp
+            .observe(sample(
+                u64::try_from(sample_index).expect("few samples") * 60_000,
+                [Some(rate); 3],
+                [Some(per_node_rate); 3],
+                64,
+            ))
+            .expect("slow-ramp sample");
+    }
+    assert_eq!(slow_ramp.parameters().mode(), AuthorityMode::Delegated);
+    let converged_per_node_rate = 5_000_u64
+        .saturating_mul(3)
+        .div_ceil(u64::try_from(slow_ramp.parameters().candidate_count()).expect("small count"));
+    assert!(
+        converged_per_node_rate <= 1_000,
+        "available capacity converges below the target"
+    );
+
+    let mut ramp = new_controller(direct(), 0);
+    for (sample_index, rate) in [1_000_u64, 10_000, 1_000_000, 100_000_000]
+        .into_iter()
+        .enumerate()
+    {
+        ramp.observe(sample(
+            u64::try_from(sample_index).expect("few samples") * 60_000,
+            [Some(rate); 3],
+            [Some(rate); 3],
+            128,
+        ))
+        .expect("ramp sample");
+    }
+    assert_eq!(ramp.parameters().mode(), AuthorityMode::Delegated);
+    assert_eq!(ramp.parameters().candidate_count(), 128);
+    assert_eq!(
+        ramp.parameters().reporting_interval_ms(),
+        DELEGATION_REPORT_INTERVALS_MS[0]
+    );
+
+    let delegated = DelegationParameters::new(
+        AuthorityMode::Delegated,
+        16,
+        AssignmentAlgorithm::XorNearest,
+        0,
+        DELEGATION_REPORT_INTERVALS_MS[0],
+    )
+    .expect("valid delegated control parameters");
+    let mut collapse = new_controller(delegated, 120_000);
+    for step in 0..=4 {
+        collapse
+            .observe(sample(step * 60_000, [Some(100); 3], [Some(100); 3], 64))
+            .expect("collapse sample");
+    }
+    assert_eq!(collapse.parameters().mode(), AuthorityMode::Direct);
+
+    let mut alternating = new_controller(direct(), 120_000);
+    let mut changes = 0;
+    for index in 0..24 {
+        let rate = if index % 2 == 0 { 900 } else { 1_100 };
+        let decision = alternating
+            .observe(sample(
+                index * 10_000,
+                [Some(rate); 3],
+                [Some(rate / 2); 3],
+                64,
+            ))
+            .expect("oscillating boundary sample");
+        changes += usize::from(decision.changed());
+    }
+    assert!(
+        changes <= 1,
+        "dwell and smoothing prevent threshold flapping"
+    );
+
+    let mut faulty = new_controller(direct(), 60_000);
+    let missing = faulty
+        .observe(sample(0, [Some(100_000), None, None], [None; 3], 64))
+        .expect("one delayed view is insufficient to change mode");
+    assert_eq!(missing.observed_rate_per_minute(), None);
+    assert_eq!(missing.parameters().mode(), AuthorityMode::Direct);
+
+    let malicious_high = faulty
+        .observe(sample(
+            1,
+            [Some(900), Some(1_000), Some(100_000_000)],
+            [Some(400), Some(500), Some(100_000_000)],
+            64,
+        ))
+        .expect("a single malicious high report does not dominate");
+    assert_eq!(malicious_high.observed_rate_per_minute(), Some(1_000));
+    assert!(!malicious_high.hard_overload());
+    assert_eq!(malicious_high.parameters().mode(), AuthorityMode::Direct);
+
+    let malicious_low = faulty
+        .observe(sample(
+            2,
+            [Some(1_000), Some(1_100), Some(0)],
+            [Some(500), Some(600), Some(0)],
+            64,
+        ))
+        .expect("a single malicious low report does not suppress the median");
+    assert_eq!(malicious_low.observed_rate_per_minute(), Some(1_000));
+    assert_eq!(malicious_low.parameters().mode(), AuthorityMode::Direct);
+
+    assert!(
+        faulty
+            .observe(sample(1, [Some(1_000); 3], [Some(500); 3], 64))
+            .is_err(),
+        "delayed out-of-order samples are rejected"
+    );
 }
 
 #[test]

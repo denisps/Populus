@@ -1031,6 +1031,24 @@ Delegation state is allowed to vary as load changes.
 
 Authority membership is not resized with popularity.
 
+The Phase 11 controller is deterministic over explicit virtual-time samples.
+It smooths the last five valid offered-rate observations, taking the median
+across the three view reports (or their midpoint when exactly two are present);
+fewer than two reports do not update the estimate. A single extreme report
+among three cannot control the rate estimate. Its initial engineering policy
+enters delegated mode at the target, scales up above 110% of estimated
+per-node capacity, and scales down below 70%. Returning to direct mode requires
+at least five low-rate samples below half the target and the minimum dwell
+period. A two-times-target overload bypasses dwell for scale-up only.
+
+The initial candidate target is `ceil(3 * observed_rate / per_node_target)`,
+rounded up to a power of two and capped by the available candidate population.
+The current experimental selector is preserved; MatchBits width is recalculated
+when that selector is active. Reporting intervals are quantized to 5, 15, or
+60 seconds, with shorter intervals at higher load. These are tunable controller
+defaults, not frozen wire constants. The controller does not define descriptor
+rollover or replace Phase 12's statistical report validation.
+
 ---
 
 # 19. Ingest report windows

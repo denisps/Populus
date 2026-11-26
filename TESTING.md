@@ -561,6 +561,13 @@ shrinks substantially more slowly than it grows
 
 Use deterministic virtual time.
 
+The controller's seeded simulation must include stable load, a slow ramp, a
+1K-to-100M viral jump, sudden collapse, alternating threshold samples, a
+missing view, out-of-order reports, and one malicious high or low view. Verify
+stable configurations stop changing, one of three outliers cannot dominate
+the median, and hard overload scales up without waiting for dwell. Capacity
+tests must distinguish an exhausted candidate pool from a controller failure.
+
 ---
 
 # 13. Tag and association tests

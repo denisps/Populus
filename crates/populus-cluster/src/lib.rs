@@ -1,5 +1,6 @@
 //! Deterministic authority selection and pure replicated-state handling.
 
+mod control_loop;
 mod delegated_ingest;
 mod direct_ingest;
 
@@ -11,6 +12,11 @@ use std::collections::BTreeSet;
 
 mod ingest_assignment;
 
+pub use control_loop::{
+    ControlLoopError, DEFAULT_DELEGATION_MIN_DWELL_MS, DELEGATION_REPORT_INTERVALS_MS,
+    DelegationControlConfig, DelegationControlDecision, DelegationController, DelegationParameters,
+    DelegationRateSample,
+};
 pub use delegated_ingest::{
     DelegatedIngestError, DelegatedIngestState, DelegatedReportReceiver, IngestReport,
     SignedIngestReportAck,
