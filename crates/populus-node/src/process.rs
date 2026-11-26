@@ -323,6 +323,7 @@ enum PendingRequest {
     },
     CandidateRegistrationAck {
         registration_hash: [u8; 32],
+        registry_node_id: NodeId,
     },
     DelegatedIngestAck {
         scope: (ContentId, UtcDay, u8),
@@ -624,7 +625,7 @@ impl PopulusProcess {
     }
 
     /// Publishes a local signed candidate registration to the four nearest
-    /// known nodes for its deterministic candidate shard.
+    /// known nodes with a current verified transport binding.
     ///
     /// # Errors
     ///
@@ -652,18 +653,7 @@ impl PopulusProcess {
             shard,
         )
         .ok_or(ProcessError::Ownership(OwnershipError::InvalidCandidate))?;
-        let logical = self
-            .logical_nodes
-            .get(&routing_node)
-            .ok_or(ProcessError::UnknownLogicalNode)?;
-        let contacts = logical
-            .routing
-            .closest_nodes(&key, 4)
-            .into_iter()
-            .filter_map(|node_id| logical.contacts.get(&node_id))
-            .take(4)
-            .cloned()
-            .collect::<Vec<_>>();
+        let contacts = self.candidate_registry_contacts(routing_node, &key)?;
         if contacts.is_empty() {
             return Err(ProcessError::NoCandidateRegistryPeers.into());
         }
@@ -714,11 +704,46 @@ impl PopulusProcess {
             };
             self.pending_requests.insert(
                 request_id,
-                PendingRequest::CandidateRegistrationAck { registration_hash },
+                PendingRequest::CandidateRegistrationAck {
+                    registration_hash,
+                    registry_node_id: contact.node_id,
+                },
             );
             requests.push(request_id);
         }
         Ok(requests)
+    }
+
+    fn candidate_registry_contacts(
+        &self,
+        routing_node: NodeId,
+        key: &RoutingKey,
+    ) -> Result<Vec<RoutingContact>, ProcessError> {
+        let logical = self
+            .logical_nodes
+            .get(&routing_node)
+            .ok_or(ProcessError::UnknownLogicalNode)?;
+        let nearest_nodes = logical.routing.closest_nodes(key, logical.routing.len());
+        let mut contacts = Vec::with_capacity(4);
+        for node_id in nearest_nodes {
+            let Some(contact) = logical.contacts.get(&node_id) else {
+                continue;
+            };
+            let peer =
+                PeerId::from_bytes(&contact.peer_id).map_err(|_| ProcessError::InvalidContact)?;
+            if !self
+                .verified_peer_nodes
+                .get(&peer)
+                .is_some_and(|node_ids| node_ids.contains(&contact.node_id))
+            {
+                continue;
+            }
+            contacts.push(contact.clone());
+            if contacts.len() == 4 {
+                break;
+            }
+        }
+        Ok(contacts)
     }
 
     /// Applies an injected direct observation from an already verified active `NodeId`.
@@ -1103,12 +1128,22 @@ impl PopulusProcess {
     /// # Errors
     ///
     /// Returns [`ProcessError::UnknownDelegatedIngestState`] if the scope was
-    /// not installed.
+    /// not installed, or [`ProcessError::InactiveLogicalNode`] if its owner is
+    /// retiring.
     pub fn record_delegated_client(
         &mut self,
         scope: (ContentId, UtcDay, u8),
         client_id: ClientId,
     ) -> Result<(), ProcessError> {
+        let owner_node = self
+            .delegated_ingest_senders
+            .get(&scope)
+            .ok_or(ProcessError::UnknownDelegatedIngestState)?
+            .state
+            .node_id();
+        if !self.is_active_logical_node(owner_node) {
+            return Err(ProcessError::InactiveLogicalNode);
+        }
         let sender = self
             .delegated_ingest_senders
             .get_mut(&scope)
@@ -1928,14 +1963,22 @@ impl PopulusProcess {
             (
                 PendingRequest::CandidateRegistrationAck {
                     registration_hash: expected,
+                    registry_node_id,
                 },
                 ApplicationMessage::CandidateRegistrationAck {
                     registration_hash: received,
                 },
-            ) if expected == received => ProcessEvent::CandidateRegistrationAcknowledged {
-                peer,
-                registration_hash: received,
-            },
+            ) if expected == received
+                && self
+                    .verified_peer_nodes
+                    .get(&peer)
+                    .is_some_and(|node_ids| node_ids.contains(&registry_node_id)) =>
+            {
+                ProcessEvent::CandidateRegistrationAcknowledged {
+                    peer,
+                    registration_hash: received,
+                }
+            }
             (
                 PendingRequest::FindNode {
                     request_id: expected,
@@ -2129,7 +2172,12 @@ impl PopulusProcess {
                 contacts.insert(contact.node_id, contact.clone());
             }
         }
+        let local_peer_id = self.peer_id().to_bytes();
         for contact in self.known_contacts.values() {
+            if contact.peer_id == local_peer_id || self.logical_nodes.contains_key(&contact.node_id)
+            {
+                continue;
+            }
             contacts
                 .entry(contact.node_id)
                 .or_insert_with(|| contact.clone());
@@ -2444,6 +2492,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn candidate_registration_is_authenticated_and_acknowledged_on_wire() {
         let server_key = Keypair::generate_ed25519();
         let client_key = Keypair::generate_ed25519();
@@ -2485,6 +2534,15 @@ mod tests {
         let mut client =
             PopulusProcess::with_identity(client_key, IdentityManagerConfig::default())
                 .expect("client process");
+        let server_identity =
+            NetworkIdentity::from_ip("1.1.1.1".parse().expect("public registry identity"))
+                .expect("registry identity");
+        let server_node = server
+            .activate_test_identity(server_identity)
+            .expect("activate registry identity");
+        let client_node = client
+            .activate_test_identity(identity)
+            .expect("activate candidate identity");
         let impostor_peer = Keypair::generate_ed25519().public().to_peer_id();
         assert!(matches!(
             server.register_candidate_registration(
@@ -2500,6 +2558,18 @@ mod tests {
             )
             .expect("listen");
         let address = process_listening_address(&mut server).await;
+        client
+            .add_verified_contact(
+                client_node,
+                RoutingContact {
+                    node_id: server_node,
+                    identity: server_identity,
+                    peer_id: server.peer_id().to_bytes(),
+                    addresses: vec![address.to_string()],
+                },
+                server.peer_id(),
+            )
+            .expect("bind authenticated registry contact");
         let payload = registration
             .canonical_bytes()
             .expect("canonical registration");
@@ -2514,7 +2584,10 @@ mod tests {
             .expect("candidate registration request");
         client.pending_requests.insert(
             request_id,
-            PendingRequest::CandidateRegistrationAck { registration_hash },
+            PendingRequest::CandidateRegistrationAck {
+                registration_hash,
+                registry_node_id: server_node,
+            },
         );
 
         let (accepted, acknowledged) = tokio::time::timeout(Duration::from_secs(10), async {
@@ -2556,6 +2629,118 @@ mod tests {
         assert_eq!(
             acknowledged.expect("acknowledged event"),
             (server.peer_id(), registration_hash)
+        );
+
+        client.pending_requests.insert(
+            request_id,
+            PendingRequest::CandidateRegistrationAck {
+                registration_hash,
+                registry_node_id: server_node,
+            },
+        );
+        client.verified_peer_nodes.remove(&server.peer_id());
+        let stale_ack = ApplicationMessage::CandidateRegistrationAck { registration_hash }
+            .encode()
+            .expect("encode stale acknowledgement");
+        assert!(matches!(
+            client.on_response(server.peer_id(), request_id, stale_ack),
+            ProcessEvent::ApplicationResponse {
+                message: ApplicationMessage::CandidateRegistrationAck { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn candidate_registry_targets_skip_contacts_with_revoked_peer_bindings() {
+        let mut process = process();
+        let local_identity = NetworkIdentity::from_ip("8.8.8.8".parse().expect("public identity"))
+            .expect("identity");
+        let local_node = process
+            .activate_test_identity(local_identity)
+            .expect("activate local identity");
+        let target = RoutingKey::from_bytes([0; 32]);
+
+        for last_octet in 1..=5 {
+            let identity = NetworkIdentity::from_ip(
+                format!("9.9.9.{last_octet}")
+                    .parse()
+                    .expect("public contact address"),
+            )
+            .expect("contact identity");
+            let peer = Keypair::generate_ed25519().public().to_peer_id();
+            let contact = RoutingContact {
+                node_id: populus_crypto::node_id(&identity),
+                identity,
+                peer_id: peer.to_bytes(),
+                addresses: vec![format!("/ip4/9.9.9.{last_octet}/tcp/4001")],
+            };
+            process
+                .add_verified_contact(local_node, contact, peer)
+                .expect("add current contact binding");
+        }
+
+        let nearest = process
+            .logical_nodes
+            .get(&local_node)
+            .expect("local logical node")
+            .routing
+            .closest_nodes(&target, 5);
+        assert_eq!(nearest.len(), 5);
+        for node_id in &nearest[..4] {
+            let contact = process.logical_nodes[&local_node]
+                .contacts
+                .get(node_id)
+                .expect("contact exists");
+            let peer = libp2p::PeerId::from_bytes(&contact.peer_id).expect("peer ID");
+            process.verified_peer_nodes.remove(&peer);
+        }
+
+        let contacts = process
+            .candidate_registry_contacts(local_node, &target)
+            .expect("select registry peers");
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].node_id, nearest[4]);
+    }
+
+    #[test]
+    fn retiring_local_identity_is_not_returned_from_discovery_cache() {
+        let mut process = process();
+        let identity = NetworkIdentity::from_ip("8.8.8.8".parse().expect("public identity"))
+            .expect("identity");
+        let local_node = process
+            .activate_test_identity(identity)
+            .expect("activate local identity");
+        let local_peer = process.peer_id();
+        let local_peer_bytes = local_peer.to_bytes();
+        process.local_addresses.push(
+            populus_network::parse_multiaddr("/ip4/8.8.8.8/tcp/4001").expect("local address"),
+        );
+        process.known_contacts.insert(
+            (local_node, local_peer),
+            RoutingContact {
+                node_id: local_node,
+                identity,
+                peer_id: local_peer_bytes,
+                addresses: vec!["/ip4/8.8.8.8/tcp/4001".to_owned()],
+            },
+        );
+        let target = RoutingKey::from_bytes([0; 32]);
+        assert_eq!(process.find_node_contacts(&target, 10).len(), 1);
+
+        process
+            .begin_identity_retirement(identity)
+            .expect("begin retirement");
+        assert_eq!(
+            process.find_node_contacts(&target, 10),
+            Vec::<RoutingContact>::new()
+        );
+        process
+            .finish_identity_retirement(identity)
+            .expect("finish retirement");
+        assert_eq!(
+            process.find_node_contacts(&target, 10),
+            Vec::<RoutingContact>::new()
         );
     }
 
@@ -3137,6 +3322,30 @@ mod tests {
                 .direct_authorities
                 .contains_key(&(sibling_content, day))
         );
+    }
+
+    #[test]
+    fn retiring_identity_cannot_record_new_delegated_clients() {
+        let (mut process, local_node, content_id, day, membership) = test_authority();
+        let scope = (content_id, day, 0);
+        let sender_state = DelegatedIngestState::new(content_id, day, 0, local_node, &membership)
+            .expect("delegated sender state");
+        process
+            .install_delegated_ingest_sender(local_node, membership, sender_state)
+            .expect("install delegated sender");
+        let identity = process
+            .logical_node(&local_node)
+            .expect("local logical node")
+            .network_identity();
+        process
+            .begin_identity_retirement(identity)
+            .expect("begin retirement");
+
+        assert_eq!(
+            process.record_delegated_client(scope, ClientId::from_bytes([9; 32])),
+            Err(ProcessError::InactiveLogicalNode)
+        );
+        assert_eq!(process.rollover_delegated_ingest(scope), Ok(None));
     }
 
     #[test]

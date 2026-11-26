@@ -1251,10 +1251,12 @@ and ownership as hints: revalidate network ID, PeerId, current direct
 reachability, lease expiry, and conflicts before restoring verified status.
 Do not treat stale local state as authority over newly observed evidence.
 
-**Current status: Partially implemented.** The transport key is written using a
-create-once temporary file, synced before publication, and followed by a
-directory sync. Candidate sequence history, ownership state, and restart
-revalidation are not persisted.
+**Current status: Partially implemented.** The transport key is written through
+a create-once temporary file and non-replacing hard link. The file and every
+directory entry along its existing or newly created path are synced before
+success; loading an existing key also syncs that path before returning it.
+Candidate sequence history, ownership state, and restart revalidation are not
+persisted.
 
 ## 11.5.2 Permissionless startup and peer discovery
 
@@ -1316,10 +1318,12 @@ network's candidate population. Registration messages must report only
 records actually admitted to the registry.
 
 **Current status: Partially implemented.** Signed registrations, sharding,
-bounded pages, and request/acknowledgement messages exist. Runtime publication
-is caller-driven, sequence history is not durably restored, and publication
-reports request IDs admitted before a fan-out failure without providing retry
-or recovery automation.
+bounded pages, and request/acknowledgement messages exist. The local registry
+retains a sequence high-water mark until the latest expiry among accepted
+versions, then reclaims that replay metadata and its bounded slot. Runtime
+publication is caller-driven, sequence history is not durably restored, and
+publication reports request IDs admitted before a fan-out failure without
+providing retry or recovery automation.
 
 ## 11.5.6 Candidate persistence, leases, and standby ranking
 

@@ -9,6 +9,7 @@ use populus_types::{NetworkIdentity, NodeId};
 
 const MAX_TRACKED_IDENTITIES: usize = 64;
 const MAX_OBSERVERS_PER_IDENTITY: usize = 64;
+const MAX_VERIFIERS_PER_IDENTITY: usize = 64;
 const DEFAULT_OBSERVATION_TTL_MS: u64 = 10 * 60 * 1000;
 const DEFAULT_VERIFICATION_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -265,6 +266,11 @@ impl IdentityManager {
         {
             return Err(IdentityManagerError::ResourceLimit);
         }
+        if !state.verifications.contains_key(&verifier)
+            && state.verifications.len() >= MAX_VERIFIERS_PER_IDENTITY
+        {
+            return Err(IdentityManagerError::ResourceLimit);
+        }
         if state.lifecycle == IdentityLifecycle::Discovered {
             state.lifecycle = IdentityLifecycle::Verifying;
         }
@@ -318,6 +324,11 @@ impl IdentityManager {
             || valid_until_ms <= now_ms
         {
             return Err(IdentityManagerError::InvalidVerification);
+        }
+        if !state.verifications.contains_key(&verifier)
+            && state.verifications.len() >= MAX_VERIFIERS_PER_IDENTITY
+        {
+            return Err(IdentityManagerError::ResourceLimit);
         }
         state.challenges.remove(&verifier);
         state.verifications.insert(
@@ -629,7 +640,7 @@ mod tests {
 
     use super::{
         IdentityLifecycle, IdentityManager, IdentityManagerConfig, IdentityManagerError,
-        ObservationEvidence, has_independent_observers,
+        MAX_VERIFIERS_PER_IDENTITY, ObservationEvidence, has_independent_observers,
     };
 
     fn peer() -> libp2p::PeerId {
@@ -959,6 +970,93 @@ mod tests {
                 3,
             )
             .expect("correct retry remains valid");
+    }
+
+    #[test]
+    fn verification_records_are_bounded_and_existing_verifiers_can_refresh() {
+        let local_peer = peer();
+        let mut manager =
+            IdentityManager::new(local_peer, IdentityManagerConfig::default()).expect("manager");
+        let network_identity = identity("8.8.8.8");
+        for index in 1..=3 {
+            manager
+                .observe(
+                    observer(index),
+                    [index; 16],
+                    [index; 16],
+                    endpoint("8.8.8.8"),
+                    true,
+                    1,
+                )
+                .expect("observation");
+        }
+        let new_verifier = observer(65);
+        manager
+            .begin_verification(network_identity, new_verifier, [65; 16], 2)
+            .expect("reserve a challenge before the verification table fills");
+
+        for index in 1..=64 {
+            let verifier = observer(index);
+            let challenge = [index; 16];
+            manager
+                .begin_verification(network_identity, verifier, challenge, 2)
+                .expect("begin verification");
+            manager
+                .record_verification(
+                    network_identity,
+                    verifier,
+                    challenge,
+                    local_peer,
+                    true,
+                    true,
+                    1_000,
+                    2,
+                )
+                .expect("record verification");
+        }
+        assert_eq!(
+            manager.identities[&network_identity].verifications.len(),
+            MAX_VERIFIERS_PER_IDENTITY
+        );
+
+        assert_eq!(
+            manager.record_verification(
+                network_identity,
+                new_verifier,
+                [65; 16],
+                local_peer,
+                true,
+                true,
+                1_000,
+                3,
+            ),
+            Err(IdentityManagerError::ResourceLimit)
+        );
+        assert_eq!(
+            manager.begin_verification(network_identity, new_verifier, [65; 16], 3),
+            Err(IdentityManagerError::ResourceLimit)
+        );
+
+        let existing_verifier = observer(1);
+        manager
+            .begin_verification(network_identity, existing_verifier, [66; 16], 3)
+            .expect("existing verifier can refresh");
+        manager
+            .record_verification(
+                network_identity,
+                existing_verifier,
+                [66; 16],
+                local_peer,
+                true,
+                true,
+                1_000,
+                3,
+            )
+            .expect("refresh existing verification");
+        assert_eq!(
+            manager.identities[&network_identity].verifications.len(),
+            MAX_VERIFIERS_PER_IDENTITY
+        );
     }
 
     #[test]

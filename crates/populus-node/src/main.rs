@@ -91,17 +91,14 @@ fn parse_options(arguments: &[String]) -> Result<RunOptions, String> {
     let mut config_path = None;
     let mut config_index = 0;
     while config_index < arguments.len() {
-        if arguments[config_index] == "--config" {
-            let Some(path) = arguments.get(config_index + 1) else {
-                return Err("missing value for --config".to_owned());
-            };
-            if config_path.replace(PathBuf::from(path)).is_some() {
-                return Err("--config may be supplied only once".to_owned());
-            }
-            config_index += 2;
-        } else {
-            config_index += 1;
+        let option = &arguments[config_index];
+        let Some(value) = arguments.get(config_index + 1) else {
+            return Err(format!("missing value for {option}"));
+        };
+        if option == "--config" && config_path.replace(PathBuf::from(value)).is_some() {
+            return Err("--config may be supplied only once".to_owned());
         }
+        config_index += 2;
     }
     if let Some(path) = config_path {
         parse_config_file(&path, &mut options)?;
@@ -387,6 +384,8 @@ async fn run(options: RunOptions) -> Result<(), Box<dyn std::error::Error + Send
 mod tests {
     #![allow(clippy::expect_used)]
 
+    use std::path::PathBuf;
+
     use super::parse_options;
     use populus_protocol::PUBLIC_NETWORK_ID;
 
@@ -426,5 +425,18 @@ mod tests {
                 .contains("missing value for --config")
         );
         assert!(parse_options(&["--network-id".to_owned(), "invalid".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn option_values_are_not_reinterpreted_as_config_flags() {
+        let arguments = [
+            "--identity-key".to_owned(),
+            "--config".to_owned(),
+            "--network-id".to_owned(),
+            "0".repeat(64),
+        ];
+        let options = parse_options(&arguments).expect("option values are tokenized once");
+        assert_eq!(options.identity_key_path, PathBuf::from("--config"));
+        assert_eq!(options.network_id.to_bytes(), [0; 32]);
     }
 }

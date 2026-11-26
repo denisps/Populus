@@ -17,6 +17,12 @@ const REGISTRATION_DOMAIN: &[u8] = b"populus/node-candidate-registration/v1";
 type CandidateShardKey = ([u8; 32], NodeId, u8);
 type CandidateShard = BTreeMap<Vec<u8>, CandidateRegistration>;
 
+#[derive(Debug, Clone, Copy)]
+struct SequenceWatermark {
+    sequence: u64,
+    retain_until_ms: u64,
+}
+
 /// A signed, expiring candidate discovery record. It is not an ownership
 /// certificate and cannot by itself activate a `NodeId`.
 #[derive(Clone, PartialEq, Eq)]
@@ -318,7 +324,7 @@ impl CandidateRegistration {
 #[derive(Debug, Default)]
 pub struct CandidateRegistry {
     shards: BTreeMap<CandidateShardKey, CandidateShard>,
-    sequence_high_water: BTreeMap<CandidateShardKey, BTreeMap<Vec<u8>, u64>>,
+    sequence_high_water: BTreeMap<CandidateShardKey, BTreeMap<Vec<u8>, SequenceWatermark>>,
     sequence_count: usize,
     count: usize,
 }
@@ -347,6 +353,7 @@ impl CandidateRegistry {
             .get(&key)
             .and_then(|sequences| sequences.get(registration.peer_id()))
             .copied();
+        let high_water_sequence = high_water.map(|watermark| watermark.sequence);
         let shard_entries = self.shards.entry(key).or_default();
         if let Some(existing) = shard_entries.get(registration.peer_id()) {
             if registration.sequence == existing.sequence && registration == *existing {
@@ -355,7 +362,7 @@ impl CandidateRegistry {
             if registration.sequence <= existing.sequence {
                 return Err(OwnershipError::StaleRegistration);
             }
-        } else if high_water.is_some_and(|sequence| registration.sequence <= sequence) {
+        } else if high_water_sequence.is_some_and(|sequence| registration.sequence <= sequence) {
             return Err(OwnershipError::StaleRegistration);
         }
         if high_water.is_none() && self.sequence_count >= MAX_CANDIDATES {
@@ -367,10 +374,16 @@ impl CandidateRegistry {
         {
             return Err(OwnershipError::CandidateLimit);
         }
-        self.sequence_high_water
-            .entry(key)
-            .or_default()
-            .insert(registration.peer_id.clone(), registration.sequence);
+        let retain_until_ms = high_water.map_or(registration.expires_at_ms, |watermark| {
+            watermark.retain_until_ms.max(registration.expires_at_ms)
+        });
+        self.sequence_high_water.entry(key).or_default().insert(
+            registration.peer_id.clone(),
+            SequenceWatermark {
+                sequence: registration.sequence,
+                retain_until_ms,
+            },
+        );
         if high_water.is_none() {
             self.sequence_count += 1;
         }
@@ -432,6 +445,11 @@ impl CandidateRegistry {
             !entries.is_empty()
         });
         self.count = self.shards.values().map(BTreeMap::len).sum();
+        self.sequence_high_water.retain(|_, sequences| {
+            sequences.retain(|_, watermark| watermark.retain_until_ms > now_ms);
+            !sequences.is_empty()
+        });
+        self.sequence_count = self.sequence_high_water.values().map(BTreeMap::len).sum();
     }
 
     /// Returns the current number of retained candidates.
@@ -571,7 +589,7 @@ impl std::error::Error for OwnershipError {}
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use super::{CandidateRegistration, CandidateRegistry, OwnershipError};
+    use super::{CandidateRegistration, CandidateRegistry, MAX_CANDIDATES, OwnershipError};
     use populus_crypto::AuthorityKeypair;
     use populus_types::NetworkIdentity;
 
@@ -583,6 +601,25 @@ mod tests {
                 .expect("network identity"),
             CandidateRegistration::peer_id_for_public_key(&signer.public_key()),
             sequence,
+            expiry,
+            vec!["/ip4/8.8.8.8/tcp/4001".to_owned()],
+            &signer,
+        )
+        .expect("candidate registration")
+    }
+
+    fn distinct_registration(index: u64, expiry: u64) -> CandidateRegistration {
+        let mut secret = [52; 32];
+        secret[..8].copy_from_slice(&index.to_be_bytes());
+        let signer = AuthorityKeypair::from_secret_key(secret);
+        let mut network_id = [0; 32];
+        network_id[..8].copy_from_slice(&index.to_be_bytes());
+        CandidateRegistration::sign(
+            network_id,
+            NetworkIdentity::from_ip("8.8.8.8".parse().expect("public IP"))
+                .expect("network identity"),
+            CandidateRegistration::peer_id_for_public_key(&signer.public_key()),
+            1,
             expiry,
             vec!["/ip4/8.8.8.8/tcp/4001".to_owned()],
             &signer,
@@ -625,6 +662,31 @@ mod tests {
             registry.insert(older, 100),
             Err(OwnershipError::StaleRegistration)
         );
+    }
+
+    #[test]
+    fn expired_sequence_metadata_releases_admission_capacity() {
+        let mut registry = CandidateRegistry::default();
+        for index in 0..u64::try_from(MAX_CANDIDATES).expect("capacity fits u64") {
+            registry
+                .insert(distinct_registration(index, 100), 1)
+                .expect("candidate admitted within capacity");
+        }
+        assert_eq!(registry.sequence_count, MAX_CANDIDATES);
+        registry.expire(100);
+        assert_eq!(registry.sequence_count, 0);
+
+        registry
+            .insert(
+                distinct_registration(
+                    u64::try_from(MAX_CANDIDATES).expect("capacity fits u64"),
+                    200,
+                ),
+                100,
+            )
+            .expect("expired replay metadata releases capacity");
+        assert_eq!(registry.sequence_count, 1);
+        assert_eq!(registry.len(), 1);
     }
 
     #[test]

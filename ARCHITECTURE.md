@@ -797,6 +797,14 @@ The nearest nodes may maintain:
 Large candidate populations must not cause unbounded
 memory, connection, or verification requirements.
 
+For each candidate, the local registry retains the sequence high-water mark
+until the latest expiry among the registration versions it has accepted. This
+keeps an older accepted version stale while that version can still be valid.
+Once every accepted version has expired, the registry releases the replay
+metadata and its bounded slot. This is not permanent replay protection: sequence
+history is local, is not persisted across restart, and does not cover versions
+the registry never observed.
+
 ---
 
 ## 5.7 Candidate persistence and selection

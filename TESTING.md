@@ -101,7 +101,8 @@ Identity tests use the same `IdentityManager` transition logic as
 seeded libp2p test keys. They cover distinct observer `NodeId`s, nonce
 correlation, IPv6 `/48` normalization, and evidence expiration. Focused
 ownership tests must cover network-scoped candidate shards, multiple
-`PeerId`s for one `NodeId`, stale sequence rejection after record expiry,
+`PeerId`s for one `NodeId`, stale sequence rejection while an older accepted
+registration remains valid, admission recovery after replay metadata expires,
 signed evidence bound to the exact candidate and challenge, conflicting
 ownership assertions, incumbent retention, and disputed-state exclusion.
 

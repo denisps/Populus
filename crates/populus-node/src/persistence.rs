@@ -11,6 +11,39 @@ const MAX_IDENTITY_FILE_BYTES: usize = 1024;
 const MAX_IDENTITY_FILE_BYTES_U64: u64 = 1025;
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
+fn sync_directory_ancestors_with(
+    directory: &Path,
+    mut sync_directory: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut current = directory;
+    loop {
+        sync_directory(current)?;
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent.as_os_str().is_empty() {
+            if current == Path::new(".") {
+                break;
+            }
+            current = Path::new(".");
+        } else if parent == current {
+            break;
+        } else {
+            current = parent;
+        }
+    }
+    Ok(())
+}
+
+fn sync_directory_ancestors(directory: &Path) -> io::Result<()> {
+    let resolved_directory = fs::canonicalize(directory)?;
+    sync_directory_ancestors_with(directory, |path| File::open(path)?.sync_all())?;
+    if resolved_directory != directory {
+        sync_directory_ancestors_with(&resolved_directory, |path| File::open(path)?.sync_all())?;
+    }
+    Ok(())
+}
+
 /// Minimal persistence boundary for the process's long-lived transport identity.
 pub trait PeerIdentityStore {
     /// Loads the encoded private identity, or returns `None` when it is absent.
@@ -84,13 +117,8 @@ fn create_parent_directories_synced(parent: &Path) -> io::Result<()> {
             }
             Err(error) => return Err(error),
         }
-        let parent = directory
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        File::open(parent)?.sync_all()?;
     }
-    Ok(())
+    sync_directory_ancestors(parent)
 }
 
 impl PeerIdentityStore for FilePeerIdentityStore {
@@ -108,6 +136,12 @@ impl PeerIdentityStore for FilePeerIdentityStore {
                 "peer identity file exceeds maximum size",
             ));
         }
+        let parent = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        sync_directory_ancestors(parent)?;
         Ok(Some(bytes))
     }
 
@@ -161,6 +195,7 @@ impl PeerIdentityStore for FilePeerIdentityStore {
                 let _ = fs::remove_file(&temporary_path);
                 return Err(error);
             }
+            sync_directory_ancestors(parent)?;
             fs::remove_file(&temporary_path)?;
             File::open(parent)?.sync_all()?;
             return Ok(());
