@@ -28,6 +28,8 @@ libp2p = { version = "0.57.1", default-features = false, features = [
 ] }
 sha2 = { version = "0.10.9", default-features = false }
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

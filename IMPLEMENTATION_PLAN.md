@@ -1202,892 +1202,243 @@ tunable pending broader simulation evidence.
 
 ---
 
-# Phase 11.5: Runnable Populus Network, Bootstrap, and Dynamic Identity Management
+# Phase 11.5: Permissionless Network Formation and Runtime Identity
 
-## Objective
+Phase 11.5 connects the existing transport, Populus DHT, identity lifecycle,
+authority, and ingest state machines. It must preserve the permissionless
+network model defined in [ARCHITECTURE.md](./ARCHITECTURE.md#5101-agreed-phase-115-protocol-decisions).
 
-Integrate the existing transport, DHT routing, authority-cluster,
-direct-ingest, and delegated-ingest components into a functional
-Populus node executable.
+A process may start and participate provisionally without a trusted manifest,
+founding committee, or privileged signer. The public network has a fixed
+protocol-defined network identifier independent of keys. Each process uses one
+configured network identifier; messages, signed evidence, candidate records,
+and persisted state must be bound to it. Disconnected groups using the same
+identifier are one network, and their DHT neighborhoods should merge through
+ordinary discovery, authenticated identity checks, and state reconciliation.
 
-Implement automatic network bootstrap, public identity discovery,
-verification, multi-identity operation, and NodeID ownership arbitration.
+Verification and ownership are local, evidence-based views. Select verifier
+preferences from the nearest currently eligible verified `NodeId`s in the local
+DHT neighborhood. Do not construct globally finalized eligibility snapshots
+or a certificate chain. Distinct verified `NodeId`s count as protocol
+identities only; they do not prove distinct physical operators. Provisional
+identities may help discovery but must not be presented as independently
+verified or used as verified authority members.
 
-A Populus process represents a physical or virtual host, not a single
-NodeID. It may operate multiple logical DHT nodes derived from distinct,
-verified public network identities.
+Ownership uses renewable bounded leases and current direct-reachability
+evidence. Keep a valid, healthy incumbent. Candidate ranking changes standby
+preference, not ownership of a healthy incumbent. Contradictory current claims
+must retain a valid incumbent only when that remains consistent with the
+evidence; otherwise mark the `NodeId` disputed and exclude it from authority
+eligibility until reconciliation. Do not claim global uniqueness or globally
+consistent membership during arbitrary partitions. Treat convergence as
+best-effort and test it under partitions, reordered evidence, churn, and
+recovery.
 
-The node must start and participate in bootstrap without requiring
-a manually configured public IP address.
+Candidate storage remains bounded and deterministically sharded. Resource
+limits are local policy, not a network-wide candidate limit. The current
+4,096-record cap is a provisional per-process registry bound, not a permanent
+limit on the network's candidate population. Defer dynamic scaling until
+simulator workloads justify it. Restart recovery preserves the process
+identity and necessary local state, then revalidates reachability and
+ownership against current observations. It does not replay a certificate
+chain from genesis.
 
-Identity discovery and verification are continuous runtime processes,
-not operations performed only during startup.
+## 11.5.1 Persistent process identity and local recovery
 
-The resulting executable must be usable on a real network without
-depending on the deterministic simulator.
+Persist the libp2p process identity atomically and durably. Preserve bounded
+local candidate sequence history and any state needed to avoid replay or
+contradictory local ownership after restart. On restart, treat saved contacts
+and ownership as hints: revalidate network ID, PeerId, current direct
+reachability, lease expiry, and conflicts before restoring verified status.
+Do not treat stale local state as authority over newly observed evidence.
 
-## Architectural principles
+**Current status: Partially implemented.** The transport key is written through
+a create-once temporary file and non-replacing hard link. The file and every
+directory entry along its existing or newly created path are synced before
+success; loading an existing key also syncs that path before returning it.
+Candidate sequence history, ownership state, and restart revalidation are not
+persisted.
 
-1. One persistent libp2p PeerId identifies the process.
-2. One process may operate multiple logical NodeIDs.
-3. Every NodeID derives exclusively from a normalized NetworkIdentity.
-4. Multiple PeerIDs may compete to operate the same NodeID.
-5. Only one active PeerID should represent a given NodeID in a
-   converged DHT membership view.
-6. New candidates must not displace healthy incumbents.
-7. Persistence and demonstrated availability determine candidate
-   preference, not the number of open ports or created keypairs.
-8. Identity observations are evidence, not proof of ownership.
-9. The Populus DHT itself provides candidate discovery and arbitration.
-10. No separate libp2p Kademlia overlay is introduced.
-11. Nodes without verified public identities may still participate
-    as outbound-only peers or clients.
-12. All candidate, verification, and arbitration state must be bounded
-    per node and subject to expiration.
+## 11.5.2 Permissionless startup and peer discovery
 
-Keep the existing separation between PeerId, NodeId, ClientId,
-ProducerId, ContentId, and RoutingKey.
+Allow a process to start with the fixed public network ID and no bootstrap
+addresses. Configured peers are discovery entry points, not trusted
+authorities. Bootstrap failure must neither terminate ordinary participation
+nor trigger special initialization. Maintain separate provisional and verified
+routing views where necessary. Retry alternate advertised addresses after a
+dial failure, and reconcile peer routing and Populus state separately when
+previously disconnected groups meet.
 
----
-
-## 11.5.1 Persistent process identity and lifecycle
-
-Refactor the current single-NodeId executable into a process managing
-multiple logical DHT nodes.
-
-Conceptual structure:
-
-```rust
-struct PopulusProcess {
-    transport: TransportManager,
-    identity_manager: IdentityManager,
-    logical_nodes: HashMap<NodeId, LogicalNode>,
-    config: NodeConfig,
-}
-```
-
-Each logical node maintains its own:
-
-- NodeId and NetworkIdentity binding
-- DHT routing state
-- authority responsibilities
-- delegated-ingest responsibilities
-- lifecycle state
-- relevant protocol timers and metrics
-
-Share libp2p transport, connection management, and cryptographic PeerId
-across logical nodes where practical.
-
-Use asynchronous tasks/state machines rather than a dedicated OS thread
-per NodeID.
-
-Limit the maximum number of simultaneously active logical nodes.
-Start with a configurable default of four.
-
-The limit is a local resource-management policy, not a network-wide
-identity restriction.
-
-Persist the process's cryptographic identity so restarting does not
-generate a new PeerId.
-
-Prefer a small, explicit persistence interface rather than introducing
-a heavyweight database prematurely.
-
-Tests:
-
-- Restart preserves PeerId.
-- A single process can manage multiple logical nodes.
-- Logical nodes have independent routing state.
-- Multiple IPv6 addresses within one normalized /48 create one NodeID.
-- Duplicate NetworkIdentity discoveries do not create duplicate nodes.
-- The configured identity limit is enforced.
-- One logical node stopping does not stop unrelated logical nodes.
-- Transport shutdown cleanly stops all logical nodes.
-
----
-
-## 11.5.2 Bootstrap and peer discovery
-
-Implement a configurable bootstrap mechanism.
-
-Initial peers may be obtained from:
-
-- explicitly configured libp2p Multiaddrs
-- DNS-based bootstrap entries
-- previously persisted peer contacts
-- optional local-network discovery
-
-Bootstrap peers are discovery entry points, not trusted authorities.
-
-The bootstrap procedure must work before the process has an active
-public NodeID.
-
-Conceptual startup:
-
-```text
-Start process
-    |
-    v
-Load persistent PeerId
-    |
-    v
-Start libp2p listeners
-    |
-    v
-Connect to bootstrap peers
-    |
-    v
-Discover additional Populus peers
-    |
-    v
-Obtain external address observations
-    |
-    v
-Verify network identities
-    |
-    v
-Activate logical NodeIDs
-    |
-    v
-Join Populus XOR DHT
-```
-
-Use the existing Populus routing implementation for iterative peer
-discovery.
-
-Implement the missing network protocol messages required to exchange
-routing contacts and execute iterative XOR-distance lookups.
-
-A routing contact must bind the NodeId to the corresponding PeerId
-and reachable transport addresses.
-
-Verify contact validity before treating it as an eligible DHT node.
-
-Bootstrap must not depend on a single permanently available server.
-
-After joining, nodes should discover peers through the decentralized
-DHT rather than relying on bootstrap infrastructure.
-
-If all known peers become unavailable, retry discovery with bounded
-exponential backoff.
-
-An isolated process with no known peers cannot discover an existing
-network. Support an explicitly configured genesis/test-network mode,
-but do not silently assume that an isolated process constitutes the
-global Populus network.
-
-Tests:
-
-- Bootstrap through one known peer.
-- Bootstrap through multiple peers.
-- Discover peers not present in the initial bootstrap list.
-- Bootstrap when the process has no NodeID.
-- Bootstrap peer disappears after discovery.
-- Previously persisted contacts enable reconnection.
-- All bootstrap peers temporarily unavailable.
-- Malformed, stale, duplicate, and contradictory peer records.
-- Routing lookup agrees with the brute-force reference model when
-  equivalent peer knowledge is available.
-- Bootstrap cannot insert an unverified NodeID into the eligible
-  authority set.
-
----
+**Current status: Partially implemented.** The process uses the configured
+network ID and can start without bootstrap addresses. Discovery retries the
+remaining advertised addresses after a dial failure. Provisional DHT views and
+ownership or authority-state reconciliation are not implemented.
 
 ## 11.5.3 Continuous public identity discovery
 
-Public identity discovery is part of the Populus protocol.
-
-A process may have multiple public network identities because of:
-
-- multiple public IPv4 addresses
-- multiple public IPv6 prefixes
-- IPv4 and IPv6 operating simultaneously
-- multiple network interfaces
-- multihoming
-- changes to externally visible NAT addresses
-
-Use local interface enumeration together with externally observed
-addresses reported by connected peers.
-
-Implement a small optional flag on suitable Populus protocol requests:
-
-```text
-REQUEST_OBSERVED_ADDRESS
-```
-
-When set, the responding peer includes its observation of the
-requester's remote connection endpoint.
-
-Conceptual response:
-
-```rust
-struct ObservedAddress {
-    observed_endpoint: SocketAddr,
-    request_nonce: Nonce,
-}
-```
-
-The observation is associated with the authenticated responding PeerId
-through the underlying libp2p connection.
-
-Do not assume a network-level observation contains a globally trusted
-claim about the requester's identity.
-
-Correlate responses with their requests, authenticated connections,
-and nonces. Reject unsolicited or stale observations.
-
-Discovery policy:
-
-- Require at least three distinct authenticated observers reporting
-  the same normalized public network identity.
-- Prefer observers representing distinct verified NodeIDs and network
-  identities.
-- Do not count multiple responses from one observer as independent.
-- For IPv6, normalize observations according to the existing /48 policy.
-- Deduplicate multiple addresses mapping to one NetworkIdentity.
-- Keep discovery state bounded and time-limited.
-- Use hysteresis to avoid identity churn from conflicting observations.
-
-Three agreeing observations promote an identity to verification,
-not directly to Active.
-
-Do not wait for all three observations when an already verified identity
-is merely being renewed and existing evidence remains valid.
-
-Discovery is continuous. It must also react to local interface changes,
-connection changes, and conflicting external observations.
-
-Tests:
-
-- Three independent agreeing observers.
-- Two agreeing observers are insufficient for initial promotion.
-- One observer sending repeated identical observations.
-- Three observers with conflicting observations.
-- IPv4 and IPv6 observations on different connections.
-- Multiple IPv6 addresses mapping to one /48.
-- A public IPv4 change during operation.
-- Stale and replayed observations.
-- Different externally observed addresses on different interfaces.
-- A malicious observer reporting an arbitrary address.
-- No observers available.
-- Discovery state expiration and resource bounds.
-
----
-
-## 11.5.4 Public identity verification
-
-An observed NetworkIdentity is not yet an active DHT identity.
-
-Each candidate follows this lifecycle:
-
-```text
-Unknown
-    |
-    v
-Discovered
-    |
-    v
-Verifying
-    |
-    v
-Active
-    |
-    +--> Suspect
-    |       |
-    |       +--> Active
-    |       |
-    |       +--> Retiring
-    |
-    +--> Retiring
-            |
-            v
-          Removed
-```
-
-When entering Verifying:
-
-1. Normalize the observed network identity using the Phase 1 rules.
-2. Derive the candidate NodeId.
-3. Discover the nearest already-active eligible DHT neighbors.
-4. Request independent verification from the appropriate verifier set.
-5. Establish fresh direct inbound reachability challenges.
-6. Confirm that the contacted endpoint authenticates as the expected
-   PeerId.
-7. Confirm that the claimed network identity is consistent with the
-   verified connection and the applicable identity policy.
-8. Record signed, time-limited verification evidence.
-9. Enter Active only after the required confirmations and ownership
-   arbitration have succeeded.
-
-Use three successful independent confirmations as the initial target,
-subject to the verifier-selection and quorum rules established below.
-
-Verification must distinguish:
-
-```text
-externally observed source address
-direct inbound reachability
-cryptographic PeerId authentication
-NodeID ownership arbitration
-```
-
-These are separate properties.
-
-A peer may have a known public IP but lack an inbound-reachable endpoint.
-
-For IPv6 /48 identities, reachability of one address in the prefix
-does not prove exclusive control of the entire allocation.
-
-Likewise, an inbound connection to a NAT-forwarded port does not prove
-exclusive ownership of the public IPv4 address.
-
-Verification therefore establishes eligible operational control of
-a network endpoint and a scarcity-identity claim, not legal or exclusive
-ownership of the IP resource.
-
-Use direct dial-back challenges where feasible. A successful relayed
-connection alone is insufficient to establish direct public reachability.
-
-Reuse libp2p Identify and available AutoNAT functionality where suitable.
-Do not duplicate an existing mechanism without justification.
-
-The verifier set should be derived deterministically from the Populus
-DHT neighborhood of the candidate NodeId, excluding the claimant itself
-and counting distinct verified network identities.
-
-Avoid a circular dependency where a candidate must already be Active
-to discover its own verifiers.
-
-Provide an explicit initial-network/genesis policy when an adequate
-verified neighborhood does not yet exist.
-
-All verification records must contain:
-
-- protocol version
-- claimed NodeId
-- claiming PeerId
-- verifier identity
-- fresh challenge/nonce binding
-- expiration or epoch
-- signature
-
-Verification evidence expires and must be renewed.
-
-Tests:
-
-- Valid identity and successful direct dial-back.
-- Observed IP with no inbound reachability.
-- Correct IP but incorrect PeerId.
-- Correct PeerId but incorrect claimed identity.
-- Replay of an old verification.
-- Verifier disappearance.
-- Conflicting verifier responses.
-- One malicious verifier.
-- IPv4 behind port-forwarding NAT.
-- IPv6 prefix with multiple reachable addresses.
-- Candidate loses reachability during verification.
-- Insufficient verified neighbors during initial bootstrap.
-- Verification must not activate a NodeID merely because
-  three arbitrary peers claimed that it was valid.
-
----
-
-## 11.5.5 NodeID candidate registry
-
-A normalized NetworkIdentity yields exactly one NodeId, but multiple
-PeerIds may compete to operate that NodeId.
-
-Example:
-
-```text
-NodeId X
-    |
-    +-- PeerId A: Active
-    +-- PeerId B: Verified standby
-    +-- PeerId C: Verified standby
-    +-- PeerId D: Candidate
-    +-- PeerId E: Candidate
-    ...
-```
-
-A shared public IPv4 address may represent thousands of physical peers.
-
-Every candidate must be discoverable without forcing the four closest
-nodes to store an unbounded list or maintain connections to all candidates.
-
-Use the Populus DHT itself for candidate registration and discovery.
-
-Do not introduce a second libp2p Kademlia network.
-
-Conceptual registry key:
-
-```text
-CandidateRegistryKey =
-    H("populus/node-candidates/v1" || NodeId)
-```
-
-Each candidate advertises a signed, expiring registration containing:
-
-```text
-NodeId
-PeerId
-reachable Multiaddrs
-registration sequence
-registration expiration
-verification references
-```
-
-Registrations are not active ownership certificates.
-
-For large candidate populations, distribute registry storage through
-deterministically derived registry shards.
-
-For example:
-
-```text
-CandidateShard =
-    prefix(H(PeerId), shard_bits)
-
-ShardKey =
-    H("populus/node-candidates/shard/v1" ||
-      NodeId || CandidateShard)
-```
-
-The base NodeId registry maintains only bounded indexing information,
-the current active binding, and selected standby summaries.
-
-Sharded registration storage handles the long tail of candidates.
-
-Candidate discovery must support bounded pagination or equivalent
-incremental enumeration.
-
-Prevent unbounded registration memory, query responses, and verification
-traffic.
-
-Registration renewal and expiration should naturally remove
-inactive candidates.
-
-All registered candidates remain conceptually eligible to compete.
-Do not automatically treat a newly discovered PeerId as malicious.
-
-A candidate's existence does not entitle it to replace an incumbent.
-
-Tests:
-
-- One candidate.
-- Multiple PeerIds sharing one NodeId.
-- Thousands of candidate registrations in simulation.
-- Deterministic registry sharding.
-- Registration expiration.
-- Duplicate registration.
-- Malformed or forged registration.
-- Bounded registry memory and response size.
-- Candidate discovery across multiple registry shards.
-- Loss and recovery of a registry-storage node.
-- Registry queries do not overload the four nearest NodeIds.
-
----
-
-## 11.5.6 Candidate persistence and ranking
-
-Prefer candidates with demonstrated availability and persistence.
-
-Persistence must be based on independently observed successful
-verification/renewal history, not self-reported timestamps.
-
-Ranking rules:
-
-1. A healthy active incumbent retains its NodeID.
-2. Verified standby candidates are preferred over unverified candidates.
-3. More persistent/reliably reachable candidates are generally preferred.
-4. Invalid, expired, or repeatedly unreachable candidates lose priority.
-5. Equal-ranked candidates use deterministic PeerId tie-breaking.
-
-Persistence is a reliability measure, not proof of honesty.
-
-A candidate with a long history must still satisfy current reachability
-and protocol-verification requirements.
-
-Do not give additional priority for:
-
-- opening many ports
-- creating additional PeerIds
-- repeatedly registering the same identity
-- submitting more verification requests
-
-The active candidate should not rotate daily merely because a different
-candidate has accumulated slightly better ranking statistics.
-
-Instead:
-
-```text
-Healthy incumbent -> remains Active
-Standby rankings   -> periodically recalculated
-Incumbent fails    -> best eligible standby considered
-```
-
-Use periodic verification epochs, initially daily, for persistence
-accounting and standby ranking.
-
-Use shorter reachability checks where required for operational failover.
-
-The exact persistence score and expiration policy must be deterministic
-for equivalent verified evidence, documented, and simulation-tested.
-
-Tests:
-
-- Healthy incumbent remains active when a new candidate joins.
-- Older verified standby outranks an otherwise equivalent newcomer.
-- Candidate cannot forge persistence through local timestamps.
-- Multiple ports do not improve ranking.
-- Candidate expiration reduces eligibility.
-- Equal-ranked candidates converge on the same order.
-- Long-lived but unreachable candidate is not promoted.
-- Thousands of competing PeerIds do not cause unbounded work.
-
----
-
-## 11.5.7 Active NodeID arbitration and failover
-
-The DHT neighborhood of a NodeId maintains the active binding and
-coordinates candidate promotion.
-
-Conceptual binding:
-
-```rust
-struct ActiveNodeBinding {
-    node_id: NodeId,
-    peer_id: PeerId,
-    generation: u64,
-    valid_until: Timestamp,
-    verification_epoch: Epoch,
-}
-```
-
-The binding must be supported by an appropriate signed quorum record,
-not merely by a candidate's own announcement.
-
-Use the existing four-node authority and membership mechanisms where
-possible, without assuming that their current state-recovery rules
-already implement safe ownership elections.
-
-A proposed active binding must specify:
-
-```text
-NodeId
-selected PeerId
-previous binding/generation
-new generation
-lease/epoch
-verification evidence
-approving verifier identities
-```
-
-An incumbent may be replaced when:
-
-- it voluntarily resigns,
-- its binding expires without successful renewal,
-- it fails the defined independent reachability checks, or
-- a documented protocol violation produces sufficient evidence.
-
-A newly registered candidate must never displace a healthy incumbent
-merely by announcing a claim to the same NodeId.
-
-Arbitration must explicitly handle:
-
-```text
-concurrent promotion proposals
-stale signed bindings
-conflicting generations
-network partitions
-temporarily unreachable incumbents
-competing verifier neighborhoods
-```
-
-A locally incremented generation counter is not enough to resolve
-conflicting promotions.
-
-The protocol must distinguish state-recovery evidence from a quorum
-decision authorizing a new active binding.
-
-If a single active binding cannot safely be determined, retain an
-explicit conflicting/unresolved state instead of arbitrarily choosing.
-
-Do not claim global uniqueness during arbitrary network partitions
-without demonstrating the required quorum intersection and membership
-assumptions.
-
-Prefer safety over availability when conflicting ownership would allow
-two independently operating DHT nodes to claim the same position.
-
-When a standby is promoted:
-
-1. Verify its current reachability.
-2. Authorize a new binding generation.
-3. Publish the binding to the relevant DHT neighborhood.
-4. Activate the promoted logical node.
-5. Recover routing and authority state from independent peers.
-6. Resume eligible authority/ingest responsibilities.
-
-The replacement does not inherit the previous PeerId's cryptographic
-identity or private state.
-
-Tests:
-
-- Incumbent fails and standby is promoted.
-- Incumbent temporarily times out and recovers.
-- Concurrent promotion requests.
-- Conflicting active bindings.
-- Stale generation replay.
-- One malicious verifier.
-- Two partitioned verifier groups.
-- Promotion during authority state recovery.
-- Incumbent voluntarily resigns.
-- Replacement reconstructs state instead of copying the failed
-  peer's private memory.
-- One NodeId is counted once in authority selection regardless
-  of how many PeerIds claim it.
-
----
-
-## 11.5.8 Dynamic identity activation and retirement
-
-Identity discovery continues for the lifetime of the process.
-
-When a new public identity is discovered:
-
-```text
-Discovered -> Verifying -> Active
-```
-
-When an existing identity changes or becomes unreachable:
-
-```text
-Active -> Suspect -> Active
-                 -> Retiring -> Removed
-```
-
-Examples:
-
-```text
-ISP changes public IPv4
-IPv6 prefix delegation changes
-second WAN connection appears
-network interface disappears
-NAT port mapping expires
-```
-
-The process must handle those changes without restarting its
-persistent transport identity.
-
-Requirements:
-
-- Avoid immediate retirement from one failed reachability check.
-- Use configurable hysteresis and expiration.
-- Stop advertising identities no longer verified.
-- Do not allow an old NodeID to remain authoritative indefinitely.
-- Allow best-effort graceful responsibility handoff.
-- Preserve unrelated active identities.
-- Rejoin under a new NodeID after verification succeeds.
-
-On multihomed systems, ensure verification is associated with the
-correct source interface/address.
-
-A successful generic outgoing connection does not prove that the
-process can originate traffic from every claimed interface.
-
-If the transport cannot support required source-address selection,
-that identity must remain unverified for the affected capability.
-
-Tests:
-
-- Public IPv4 changes while the process remains running.
-- IPv6 prefix changes.
-- One of several identities disappears.
-- New identity discovered while at configured capacity.
-- NAT mapping changes.
-- Temporary network outage.
-- Concurrent activation and retirement.
-- Graceful shutdown of a logical node.
-- No stale authority claims after retirement.
-
----
-
-## 11.5.9 Integrate existing protocols into populus-node
-
-Connect the previously implemented protocol components to the real
-network executable.
-
-Do not reimplement them in the executable.
-
-The node must support:
-
-- Populus DHT peer discovery
-- nearest-node lookup
-- authority-cluster membership
-- signed authority communication
-- direct-ingest request handling
-- actual client vote counting
-- signed ACK responses
-- popularity queries
-- delegated-ingest descriptor discovery
-- delegated-ingest operation using the Phase 9-11 components
-
-Retain the modular separation:
-
-```text
-populus-node
-    |
-    +-- process lifecycle
-    +-- identity manager
-    +-- logical DHT nodes
-    +-- protocol state machines
-    |
-    v
-populus-network
-    |
-    v
-libp2p Swarm
-```
-
-Do not introduce libp2p Swarm dependencies into pure routing or
-authority state-machine code.
-
-Keep existing deterministic state-machine tests as independent oracles.
-
-A full public deployment, NAT traversal solution, or graphical client
-is not required in this phase.
-
-The node must nevertheless be able to form a functional network
-between mutually reachable instances.
-
----
-
-## 11.5.10 CLI and operational visibility
-
-Replace the existing manually supplied identity requirement with
-automatic discovery.
-
-Illustrative CLI:
-
-```text
-populus-node run \
-    --listen /ip4/0.0.0.0/tcp/4001 \
-    --bootstrap <multiaddr> \
-    --max-node-ids 4
-```
-
-Support configuration-file equivalents.
-
-Provide observability for:
-
-```text
-PeerId
-listening Multiaddrs
-connected peers
-bootstrap state
-observed public addresses
-candidate identities
-verified identities
-active NodeIDs
-identity verification status
-candidate/standby ranking
-DHT routing-table health
-authority assignments
-ingest status
-```
-
-Provide a simple status interface or CLI command.
-
-Support graceful shutdown and persistent PeerId reuse.
-
-Use structured tracing.
-
-Do not expose private keys or unbounded peer lists in logs.
-
----
-
-## 11.5.11 Testing and simulation
-
-Extend populus-sim with actual identity-management and
-bootstrap state machines.
-
-The deterministic simulator must exercise the same pure logic used
-by the executable.
-
-Include:
-
-```text
-bootstrap with no NodeID
-public-address observations
-identity verification
-multiple identities per process
-candidate registration
-shared-IP competition
-incumbent retention
-standby promotion
-address changes
-verification expiration
-network partitions
-malicious and stale identity claims
-```
-
-Add multi-process localhost tests using real libp2p connections.
-
-These tests should not depend on Linux network namespaces yet.
-
-Inject address observations and reachability results through explicit
-test interfaces where necessary.
-
-Use exact independent state/reference models for candidate ordering,
-binding generations, and election outcomes.
-
-For protocol transitions, test the actual resulting state rather
-than searching logs for expected strings.
-
-Run all existing quality gates.
-
-Record dependency, binary-size, and performance changes.
-
----
-
-## Phase 11.5 completion criteria
-
-Phase 11.5 is complete when:
-
-1. populus-node starts without a manually configured public identity.
-2. It bootstraps through known peers and discovers additional DHT peers.
-3. It discovers its public network identities at runtime.
-4. Three independent agreeing observations can initiate verification.
-5. Verification checks direct reachability and authenticated PeerId.
-6. A verified identity can activate as a logical NodeID.
-7. One process can manage several NodeIDs with independent DHT state.
-8. Several PeerIDs can register as candidates for one NodeID.
-9. A healthy incumbent is not displaced by a new candidate.
-10. Candidate ranking and standby promotion are deterministic for
-    equivalent verified evidence.
-11. Conflicting active bindings are detected and safely handled.
-12. Public identity changes do not require process restart.
-13. The executable performs actual DHT routing and authority discovery.
-14. Five reachable Populus processes can establish a functioning
-    DHT neighborhood.
-15. A client can submit a direct vote and query its popularity.
-16. An authority failure can trigger replacement and state recovery.
-17. Existing delegated-ingest components can operate through the
-    real network adapter.
-18. Real-network tests and deterministic simulator tests pass.
-19. The implementation remains bounded in memory and connection use.
-20. ARCHITECTURE.md, TESTING.md, and AGENTS.md document the
-    implemented identity lifecycle and verification assumptions.
-
-The identity-verification and arbitration assumptions must be stated
-explicitly. Passing a local test does not establish that the protocol
-is secure against arbitrary collusion, eclipse attacks, or partitions.
-
-Phase 17 will validate these mechanisms using real Linux network
-namespaces, source addresses, NAT, and kernel-level faults.
-
----
+Continue observing direct connection endpoints and locally discovered public
+addresses throughout process lifetime. Normalize every address through the
+production `NetworkIdentity` validator. Support multiple IPv4 and IPv6
+identities per process, deduplicate equivalent normalized identities, and
+revalidate after address or connection changes. Inject public-address
+observations and reachability outcomes in tests without weakening production
+validation. Rotate periodic observer selection so peers beyond a fixed prefix
+are not starved.
+
+**Current status: Partially implemented.** The process periodically refreshes
+observations, rotates the selected connected peers, and attributes requests to
+their exact connection endpoints. The runtime still does not discover and
+activate every local address change automatically. Multiple identity lifecycle
+and revalidation cases need broader integration coverage.
+
+## 11.5.4 Provisional participation and identity verification
+
+A new identity may exchange discovery information provisionally. A provisional
+claim is not a verified active `NodeId`; only current authenticated evidence
+may promote it. Count distinct verified active `NodeId`s rather than `PeerId`s
+when a policy requires independent protocol identities. Retain the current
+production address eligibility validator. Bind signed observation and
+reachability evidence to the network ID, exact candidate registration, fresh
+challenge, verifier identity, and validity interval. Preserve valid incumbent
+state during refresh and do not consume a challenge on an invalid response.
+
+**Current status: Partially implemented.** Local observation, nonce, identity,
+and direct-verification lifecycle APIs exist. Provisional DHT participation,
+network-bound signed evidence, and end-to-end verifier exchange are not
+implemented. The lifecycle must also preserve capacity while verification is
+refreshed and while retirement cleanup is pending.
+
+## 11.5.5 Bounded candidate registry
+
+Keep signed, expiring candidate registrations bound to the configured network,
+normalized identity, derived `NodeId`, transport public key, and exact
+`PeerId`. Preserve deterministic sharding and bounded pages. Retain sequence
+high-water marks after a registration expires so an older still-valid record
+cannot reappear. The per-process cap is a resource limit; it does not cap the
+network's candidate population. Registration messages must report only
+records actually admitted to the registry.
+
+**Current status: Partially implemented.** Signed registrations, sharding,
+bounded pages, and request/acknowledgement messages exist. The local registry
+retains a sequence high-water mark until the latest expiry among accepted
+versions, then reclaims that replay metadata and its bounded slot. Runtime
+publication is caller-driven, sequence history is not durably restored, and
+publication reports request IDs admitted before a fan-out failure without
+providing retry or recovery automation.
+
+## 11.5.6 Candidate persistence, leases, and standby ranking
+
+Persist the local identity and sequence state needed for safe renewal. Use
+renewable bounded leases and current independently verified reachability.
+Prefer standbys with verified successful renewal history, then apply a stable
+`PeerId` tie-break. Do not rotate a healthy incumbent because another
+candidate ranks higher. Lease duration, renewal interval, and tolerated clock
+skew are provisional until simulation measures their behavior under delay,
+partitions, stale messages, and restart.
+
+**Current status: Deferred.** Candidate renewals, distributed registry
+persistence, verified renewal history, and standby ranking are not connected to
+a runtime ownership view. Existing lease constants are provisional.
+
+## 11.5.7 Conflict-aware local ownership view
+
+Represent candidate observations and ownership claims as network-scoped,
+independently verifiable evidence. Reject replayed, expired, wrong-network, or
+wrong-candidate evidence. When two claims conflict, retain a still-valid
+incumbent only if current evidence supports it; otherwise mark the `NodeId`
+disputed and exclude it from authority eligibility. Do not select a winner
+because one group started earlier, because it contains bootstrap peers, or
+because its routing table merged first. Convergence is expected after peers
+exchange current evidence, but is not a global partition-time guarantee.
+
+**Current status: Deferred.** Genesis-rooted committee and binding-certificate
+machinery has been removed. The process does not yet exchange distributed
+ownership evidence or reconcile conflicting assertions. Keep disputed
+identities out of authority eligibility until a safe reconciliation mechanism
+is implemented and simulated.
+
+## 11.5.8 Identity activation and retirement
+
+Allow multiple normalized IPv4/IPv6 identities per process while enforcing
+local resource bounds. Do not release an active slot during verification
+refresh or before retirement cleanup completes. Beginning retirement stops
+advertising the identity and accepting new direct or delegated ingest work for
+its authority state. Keep the retirement marker until routing and authority
+cleanup finishes. Do not reactivate an identity already retiring.
+
+**Current status: Partially implemented.** The process keeps lifecycle state
+per normalized identity, excludes retiring identities from newly advertised
+contacts, and binds authority work and cleanup to its owning logical `NodeId`.
+Complete multi-identity handoff remains incomplete.
+
+## 11.5.9 Existing authority and ingest integration
+
+Use the existing direct and delegated ingest state machines without simplified
+substitutes. Resolve `ClientId` from the exact authenticated inbound
+connection endpoint. A direct-vote success event or acknowledgement may be
+reported only after the authority state machine accepts and records the vote.
+Reject direct and delegated ingest from retiring or disputed authorities.
+Preserve duplicate handling, acknowledgements, retry buffers, and replicated
+state invariants. Network membership discovery and authority-state conflict
+reconciliation are separate responsibilities.
+
+**Current status: Partially implemented.** Request/response adapters invoke
+the existing ingest state machines and return signed acknowledgements only
+after acceptance. The process uses the exact inbound connection endpoint for
+client identity checks. Membership remains caller-installed, and automated
+authority membership, fan-out, retry, and recovery are incomplete.
+
+## 11.5.10 CLI, configuration, and observability
+
+Provide one network ID per process, defaulting to the fixed public network ID.
+Remove trusted-genesis options and configuration keys. Reject a `--config`
+option without a filename, malformed network IDs, unsupported address forms,
+and unknown keys. Log provisional, verified, disputed, and retiring state
+without implying global ownership guarantees.
+
+**Current status: Partially implemented.** The CLI accepts one configured
+network ID, defaults to the fixed public ID, rejects unknown keys, and no
+longer exposes genesis authorization options. Structured lifecycle
+observability and broader configuration validation remain.
+
+## 11.5.11 Tests, simulations, and acceptance criteria
+
+Use focused unit tests for canonical encoding, network mismatch, replay,
+challenge retention, candidate sequence rollback, persistence durability,
+identity transitions, and exact connection attribution. Use localhost tests for
+actual authenticated transport behavior and multi-identity processes. Keep the
+Linux namespace laboratory in Phase 17. Deterministic simulation must cover
+partition and merge, candidate conflicts, incumbent renewal, delayed and
+reordered evidence, stale state after restart, multiple PeerIds per NodeId,
+and authority/ingest refusal while disputed or retiring.
+
+Run workspace tests, deterministic simulation, strict Clippy, and the commit
+and PR gates after protocol and runtime work is complete. Do not claim a
+quality gate that was not run.
+
+### Phase 11.5 completion criteria
+
+| Criterion | Status | Evidence / remaining work |
+| --- | --- | --- |
+| 1. Stable process identity and durable restart recovery | Partially implemented | The transport identity is created atomically and durably. Candidate sequence state, ownership leases, and restart revalidation are not persisted. |
+| 2. Permissionless startup without genesis authorization | Fully implemented | A process can start without bootstrap peers or trusted authorization. Genesis manifests, trusted signing keys, CLI options, and committee-chain runtime APIs are absent. Peer discovery and convergence have separate criteria below. |
+| 3. Network ID is fixed/configured and binds messages and state | Partially implemented | The CLI defaults to the fixed public ID, and the application envelope and candidate-registration messages are network-scoped. Durable network-scoped candidate and ownership state is not implemented. |
+| 4. Bootstrap discovery, retries, and neighborhood merging | Partially implemented | Discovery retries alternate advertised addresses. Separate provisional routing and ownership or authority-state reconciliation after groups meet are not implemented. |
+| 5. Continuous multi-address identity discovery | Partially implemented | Periodic observations, exact endpoint attribution, and observer rotation exist. Automatic discovery, activation, and revalidation of every local address change remain incomplete. |
+| 6. Provisional participation without false verification claims | Partially implemented | Provisional contacts can assist discovery but are not treated as verified routing or authority members. A separate provisional routing view and complete promotion workflow are absent. |
+| 7. Distinct verified NodeId evidence and direct reachability | Partially implemented | Local lifecycle logic counts distinct verified NodeIDs and accepts direct-reachability results. Network-bound signed evidence exchange and end-to-end verifier challenge handling are not implemented. |
+| 8. Bounded sharded candidate registry without a global cap | Partially implemented | Signed registrations, deterministic shards, bounded pages, and local capacity limits exist. The 4,096-record cap is local, not network-wide. Sequence watermarks are retained through accepted-record expiry, but are not persisted across restart or replicated. |
+| 9. Renewable leases and incumbent/standby behavior | Deferred | Runtime ownership has no renewable leases or verified renewal history for standby ranking and incumbent retention. Lease constants remain provisional. |
+| 10. Conflict detection and eventual state reconciliation | Deferred | Local registration conflicts can be rejected, but distributed ownership evidence is not exchanged and ownership or authority-state conflicts are not reconciled. |
+| 11. Safe identity retirement and authority cleanup | Partially implemented | Retirement stops new advertisements and ingest work for the retiring owner; cleanup preserves sibling-owned state. Complete handoff and persisted authority recovery remain. |
+| 12. Actual authority and ingest state-machine integration | Partially implemented | Direct and delegated adapters use the existing state machines, exact endpoint attribution, and acceptance-based acknowledgements. Membership installation, fan-out, retry, and recovery remain caller-managed. |
+| 13. Regression coverage and quality gates | Partially implemented | Focused regression tests and the `cargo xtask gate pr` workspace gate passed at commit `53d7615`, including workspace tests, strict Clippy, documentation tests, coverage, and 30 deterministic simulation tests. The required partition/merge, ownership-conflict, restart-revalidation, and disputed-authority simulations are not yet implemented. |
+
+Phase 11.5 is incomplete. The pre-release trusted-genesis committee design has
+been removed; it is not part of the permissionless protocol or a compatibility
+requirement. No claim of global ownership uniqueness, global membership
+consistency, or partition-time availability is part of the acceptance
+criteria.
 
 # 17. Phase 12: outlier and Byzantine-report handling
 
@@ -2216,8 +1567,10 @@ anonymous content remains valid
 Provide durable, bounded, and recoverable storage for Populus state
 that must survive process restarts, crashes, and network interruptions.
 
-Phase 11.5 introduces the minimum persistence needed for a runnable
-node, particularly its cryptographic PeerId and bootstrap contacts.
+Phase 11.5 requires durable persistence of the process's cryptographic
+identity. Durable bootstrap-contact caching remains future work; configured
+bootstrap addresses are local configuration, and discovered contacts are
+currently kept in bounded memory.
 
 Phase 15 formalizes storage durability, recovery semantics, integrity,
 migration, and resource management across all implemented subsystems.

@@ -16,6 +16,114 @@ use populus_crypto::{AuthorityKeypair, RoutingIdentifier, routing_key};
 use populus_sketch::ClientSketch;
 use populus_types::{ClientId, ContentId, NodeId, UtcDay};
 
+#[test]
+fn identity_observation_lifecycle_is_seeded_bounded_and_expires_on_virtual_time() {
+    use libp2p::identity::Keypair;
+    use populus_node::{IdentityLifecycle, IdentityManager, IdentityManagerConfig};
+
+    fn peer(seed: u8) -> libp2p::PeerId {
+        let mut secret = [seed; 32];
+        Keypair::ed25519_from_bytes(&mut secret)
+            .expect("fixed simulation key")
+            .public()
+            .to_peer_id()
+    }
+
+    fn observer(seed: u8) -> NodeId {
+        NodeId::from_bytes([seed; 32])
+    }
+
+    let mut manager = IdentityManager::new(
+        peer(99),
+        IdentityManagerConfig {
+            observation_ttl_ms: 100,
+            ..IdentityManagerConfig::default()
+        },
+    )
+    .expect("identity manager");
+    let ipv4_identity = populus_types::NetworkIdentity::from_ip("8.8.8.8".parse().expect("IPv4"))
+        .expect("eligible identity");
+
+    for (index, observer_node_id) in [(0_u8, observer(1)), (1, observer(2))] {
+        assert_eq!(
+            manager
+                .observe(
+                    observer_node_id,
+                    [index; 16],
+                    [index; 16],
+                    "8.8.8.8:4000".parse().expect("endpoint"),
+                    true,
+                    u64::from(index),
+                )
+                .expect("observation"),
+            IdentityLifecycle::Unknown
+        );
+    }
+    assert_eq!(
+        manager
+            .observe(
+                observer(1),
+                [3; 16],
+                [3; 16],
+                "8.8.8.8:4001".parse().expect("endpoint"),
+                true,
+                3,
+            )
+            .expect("duplicate observer update"),
+        IdentityLifecycle::Unknown
+    );
+    assert_eq!(
+        manager
+            .observe(
+                observer(3),
+                [4; 16],
+                [4; 16],
+                "8.8.8.8:4000".parse().expect("endpoint"),
+                true,
+                4,
+            )
+            .expect("third independent observer"),
+        IdentityLifecycle::Discovered
+    );
+    assert_eq!(
+        manager.lifecycle(&ipv4_identity),
+        IdentityLifecycle::Discovered
+    );
+
+    let ipv6_identity =
+        populus_types::NetworkIdentity::from_ip("2001:4860:1:2::1".parse().expect("IPv6"))
+            .expect("eligible identity");
+    for (index, address) in ["2001:4860:1:2::2", "2001:4860:1:2::3", "2001:4860:1:2::4"]
+        .into_iter()
+        .enumerate()
+    {
+        manager
+            .observe(
+                observer(u8::try_from(index + 5).expect("small seed")),
+                [u8::try_from(index).expect("small nonce"); 16],
+                [u8::try_from(index).expect("small nonce"); 16],
+                format!("[{address}]:4000").parse().expect("endpoint"),
+                true,
+                10 + u64::try_from(index).expect("small time"),
+            )
+            .expect("normalized IPv6 observation");
+    }
+    assert_eq!(
+        manager.lifecycle(&ipv6_identity),
+        IdentityLifecycle::Discovered
+    );
+    manager.advance(200);
+    assert_eq!(
+        manager.lifecycle(&ipv4_identity),
+        IdentityLifecycle::Unknown
+    );
+    assert_eq!(
+        manager.lifecycle(&ipv6_identity),
+        IdentityLifecycle::Unknown
+    );
+    assert_eq!(manager.active_count(), 0);
+}
+
 fn assignment_descriptors(node_ids: &[NodeId]) -> Vec<DelegationDescriptor> {
     vec![
         DelegationDescriptor::new(

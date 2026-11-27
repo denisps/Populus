@@ -13,5 +13,9 @@ populus-routing = { version = "0.1.0", path = "../../crates/populus-routing" }
 populus-sketch = { version = "0.1.0", path = "../../crates/populus-sketch" }
 populus-types = { version = "0.1.0", path = "../../crates/populus-types" }
 
+[dev-dependencies]
+libp2p.workspace = true
+populus-node = { version = "0.1.0", path = "../../crates/populus-node" }
+
 [lints]
 workspace = true

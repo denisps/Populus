@@ -1,0 +1,7 @@
+# Signed popularity response v1.
+# Content ID: CIDv1 with a SHA-256 digest of 0x09 repeated 32 times.
+# UTC day: 12. Membership generation: 3.
+# Authority keys use seeds 0x0b through 0x0e repeated to 32 bytes.
+# The first canonical membership member signs the response.
+# Estimate: 123.5. Finalized: false.
+encoded = 5050535401017112200909090909090909090909090909090909090909090909090909090909090909000000000000000c0000000000000003405ee00000000000001928c800ca55c850ed500a43f819541a915d141d12b0f966f65d8b5661b1fa776066dbbbb97b01d975cd6af05f252887f8d3189a48cc14965d228f425bd49e9d1b0694c79eb8e5439763a71b5a23721dedc1a74157ffffd315c227d75db14205

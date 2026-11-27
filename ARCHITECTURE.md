@@ -546,14 +546,17 @@ The process initially operates as an authenticated libp2p peer.
 It exchanges peer contacts, discovers DHT neighborhoods, and
 collects externally observed address information.
 
-After verification, it activates one or more logical NodeIds
-and joins the Populus DHT under those identities.
+It may first join discovery provisionally, without claiming verified status.
+After collecting sufficient current evidence, it can use one or more verified
+logical `NodeId`s for DHT and authority-eligible operations.
 
 Bootstrap continues as needed after initial startup.
 
-An isolated node with no known peers requires explicit genesis
-or test-network configuration. It cannot discover the existing
-network without an initial communication path.
+An isolated node may start provisionally and form a separate local neighborhood
+through any available peer-discovery path. It needs a communication path to
+discover other peers, but it does not need genesis authorization. If it later
+discovers a group using the same network identifier, ordinary peer discovery
+and state reconciliation merge their views.
 
 ---
 
@@ -632,7 +635,8 @@ Three peers observe addresses in the same eligible /48
 Candidate IPv6 NetworkIdentity
 ```
 
-Multiple observations from one PeerId count as one observer.
+Multiple PeerIds mapped to the same verified active `NodeId` count as one
+observer.
 
 Prefer observations from distinct verified NodeIds and diverse
 network identities where possible.
@@ -668,7 +672,8 @@ For a candidate NetworkIdentity:
 The verifier set is derived deterministically from the
 candidate NodeId's DHT neighborhood, excluding the claimant.
 
-The initial target is three independent successful confirmations.
+The initial target is three successful confirmations from distinct verified
+active `NodeId`s; it does not establish physical-operator independence.
 
 The precise verifier quorum and membership rules must be tested
 for overlap, partitions, and malicious verifiers before being
@@ -791,6 +796,14 @@ The nearest nodes may maintain:
 
 Large candidate populations must not cause unbounded
 memory, connection, or verification requirements.
+
+For each candidate, the local registry retains the sequence high-water mark
+until the latest expiry among the registration versions it has accepted. This
+keeps an older accepted version stale while that version can still be valid.
+Once every accepted version has expired, the registry releases the replay
+metadata and its bounded slot. This is not permanent replay protection: sequence
+history is local, is not persisted across restart, and does not cover versions
+the registry never observed.
 
 ---
 
@@ -1002,14 +1015,173 @@ Verifier quorum rules, active-binding arbitration,
 candidate-registry capacity, and eclipse resistance must
 be tested before the relevant protocol behavior is frozen.
 
-Phase 11.5 implements the operational mechanisms and
-deterministic/localhost tests.
+## 5.10.1 Agreed Phase 11.5 protocol decisions
+
+Populus is permissionless. A process does not need a privileged genesis
+manifest, trusted signer, founding committee, or globally certified membership
+history to start, connect to peers, or help form a DHT neighborhood. Independent
+groups that use the same network identifier are ordinary parts of one network.
+When they discover one another, peer discovery and identity checks can join
+their routing views; ownership and authority-state conflicts still require
+their own evidence-based reconciliation.
+
+Each process uses one configured network identifier. The public network has a
+fixed protocol-defined identifier that is independent of any signing key.
+Private or test networks may use different identifiers. Messages, candidate
+records, signed observations, and persisted network state are scoped to that
+identifier. A network identifier distinguishes intentionally separate
+networks; it is not a genesis root or evidence that two disconnected groups
+should remain separate.
+
+For a target `NodeId`, verifier preference is drawn from the nearest currently
+eligible verified `NodeId`s in the local Populus DHT neighborhood, ordered by
+XOR distance and then `NodeId`. There is no globally finalized eligibility
+snapshot or committee certificate chain. Neighboring processes can therefore
+temporarily select different verifiers as their views change. Signed
+observations and reachability evidence are bound to the network, candidate,
+challenge, and validity interval so another candidate or network cannot reuse
+them. Evidence supports convergence but does not create an immutable global
+membership record. Distinct verified `NodeId`s are protocol identities, not a
+claim of distinct physical operators.
+
+An identity may participate provisionally before enough evidence is available.
+Provisional contacts can help peer discovery and neighborhood formation, but
+they must not be presented as independently verified or used where verified
+authority eligibility is required. Verification reflects the current local
+evidence and neighborhood; it is not a global consensus result.
+
+Ownership uses renewable bounded leases and current direct-reachability
+evidence. A healthy incumbent remains preferred while its binding is valid;
+standby ranking does not rotate a healthy owner. When current evidence
+contradicts ownership assertions, a process retains an independently
+verifiable incumbent only when that choice is consistent with the evidence.
+Otherwise it marks the `NodeId` disputed and excludes it from authority
+eligibility until the conflict can be reconciled. A routing-table merge alone
+does not reconcile signed ownership or replicated authority state. No
+protocol guarantee of globally unique ownership or globally consistent
+membership is made during arbitrary partitions. Local views are expected to
+converge after communication resumes, subject to fresh evidence and the
+network's security assumptions.
+
+Candidate registrations are signed by the transport identity they bind,
+sequence-numbered, expiring discovery records. They are not ownership
+certificates. Candidate storage remains bounded and deterministically sharded
+as a local resource policy. The existing 4,096-record cap is not a
+network-wide candidate limit; more sophisticated dynamic scaling is deferred
+until simulator workloads justify it.
+
+Restart recovery preserves the process's transport identity and necessary
+local state, then revalidates reachability and ownership against current
+observations. It does not replay a certificate chain from genesis. Lease
+duration, renewal cadence, and tolerated clock skew remain provisional until
+the deterministic simulator evaluates them under delay, churn, partitions, and
+recovery.
+
+The authority and ingest state machines remain the source of truth for
+accepted votes, acknowledgements, and replicated authority transitions.
+Runtime adapters must report a vote as accepted only after the existing ingest
+state machine accepts it. Authority membership installation, distributed
+conflict reconciliation, automatic delegated-ingest fanout/retry, and complete
+crash recovery remain implementation work; local state-machine tests do not
+establish global distributed safety.
+
+Phase 11.5 is still in progress. This section distinguishes the intended
+permissionless protocol from implemented local components; it does not claim
+that distributed ownership convergence is complete.
 
 Phase 16 performs adversarial protocol hardening.
 
 Phase 17 validates the mechanisms using actual Linux
 network namespaces, NAT, multihoming, and kernel-level
 network failures.
+
+## 5.11 Runtime message and process boundary
+
+The transport continues to carry length-framed application payloads.
+The current application envelope is:
+
+```text
+"POP" || version:u8(1) || network_id:bytes[32] || message_tag:u8 || canonical_payload
+```
+
+The network identifier changed the bytes of the earlier experimental,
+pre-release envelope. That earlier form is intentionally unsupported: the
+decoder rejects it rather than guessing whether a message belongs to the
+public network. No compatibility guarantee was made for pre-release frames;
+any future incompatible change after this v1 contract is frozen must use a
+new envelope version.
+
+Every message is rejected when its network identifier differs from the
+process's configured network. Version 1 defines bounded `FindNode`,
+routing-contact response,
+observed-address request/response, direct-vote and signed-acknowledgement,
+popularity query/response, delegated-ingest report/acknowledgement,
+candidate-registration request/acknowledgement, and typed error messages.
+Unknown versions, tags, malformed fields, trailing bytes, and payloads
+larger than 1 MiB are rejected. A routing response contains at most 20
+contacts; a contact contains at most 8 addresses, each at most 256 bytes.
+PeerId encodings are limited to 128 bytes.
+
+A routing contact carries both `NodeId` and canonical `NetworkIdentity`.
+Decoding verifies that the `NodeId` derives from the `NetworkIdentity`, and
+process validation checks the `PeerId` encoding and address syntax. These
+checks establish internal consistency only. A discovered contact remains
+provisional until independent evidence verifies its current identity and
+reachability. Provisional contacts may assist discovery but are not inserted
+into a verified routing view or authority set.
+
+`PopulusProcess` shares one transport PeerId across independently routed
+logical nodes. Its local identity manager correlates observations by nonce,
+counts distinct verified active `NodeId`s rather than `PeerId`s, normalizes
+IPv6 addresses using the existing `/48` policy, and expires observations and
+verification evidence. This does not claim distinct physical operators. The
+initial limits are four active identities, 64 tracked
+identities, and 64 observers per identity. The direct-verification API
+accepts a result only after its caller has authenticated the candidate
+PeerId, checked the fresh challenge, and established direct reachability;
+the manager itself does not validate signed verifier certificates.
+
+The network process can install a caller-validated content/day authority
+membership and signing key. It then uses the existing direct-ingest state
+machine to authenticate the source `ClientId` from the direct connection's
+public endpoint, validate and idempotently record votes, sign each accepted
+vote acknowledgement, and serve membership-bound signed popularity estimates.
+The source identity resolver uses the unchanged production `NetworkIdentity`
+eligibility policy; localhost integration tests inject an identity result only
+through a test-only hook. This adapter does not discover or certify authority
+membership, replicate authority snapshots, or implement membership replacement.
+
+Delegated ingest similarly uses the existing `DelegatedIngestState` sender
+buffer and `DelegatedReportReceiver`: callers install membership-bound sender
+or receiver state, reports are accepted only from a transport `PeerId` mapped
+to the report's verified active `NodeId`, and accepted reports receive a
+membership-signed ACK. Returned ACKs are checked against the exact pending
+scope, authority signer, verified peer binding, and existing sender buffer;
+that state machine retains reports until all four expected authorities ACK.
+This is a real request/response adapter, not a replacement ingest model, but
+authority selection/contact discovery, four-recipient fanout, retry scheduling,
+membership transitions, and crash recovery are not automated.
+
+The file-backed PeerIdentityStore persists libp2p protobuf key encoding in
+a create-once file (0600 on Unix). Bootstrap and discovered contacts are
+bounded in memory but are not yet durable. Runtime bootstrap tries up to
+32 configured addresses, caches up to 256 discovered candidates, and
+auto-dials at most 32 of them. These are local resource limits, not
+network-wide protocol limits.
+
+This runtime boundary is not a completed Phase 11.5 security protocol. Signed
+candidate registrations and deterministic bounded registry shards exist as
+local components. Registration publication is caller-triggered and reaches
+known DHT contacts; records and ownership state are not restored after
+restart. The runtime does not exchange distributed ownership evidence,
+reconcile conflicting claims, implement renewable ownership leases, or rank
+standbys from verified renewal history. It also does not automate verification
+challenges or maintain a distinct provisional routing view. Authority
+membership discovery and state replication, automated delegated-ingest
+fanout/retry and recovery, and durable bootstrap contacts remain
+unimplemented. A direct vote is acknowledged as counted only when a
+caller-installed authority state accepts it; otherwise the process returns a
+typed refusal and does not claim success.
 
 ---
 

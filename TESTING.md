@@ -96,11 +96,52 @@ malice
 load
 ```
 
+Identity tests use the same `IdentityManager` transition logic as
+`populus-node`, advance supplied virtual timestamps without sleeping, and use
+seeded libp2p test keys. They cover distinct observer `NodeId`s, nonce
+correlation, IPv6 `/48` normalization, and evidence expiration. Focused
+ownership tests must cover network-scoped candidate shards, multiple
+`PeerId`s for one `NodeId`, stale sequence rejection while an older accepted
+registration remains valid, admission recovery after replay metadata expires,
+signed evidence bound to the exact candidate and challenge, conflicting
+ownership assertions, incumbent retention, and disputed-state exclusion.
+
+Permissionless simulations must not model a genesis root or globally
+certified committee. They should form separate neighborhoods independently,
+exchange peer and ownership evidence after connectivity returns, and verify
+that routing-table merging alone does not clear contradictory authority state.
+Exercise message loss, duplication, reordering, stale leases, clock skew,
+identity changes, restart revalidation, candidate discovery, and authority /
+ingest behavior while an identity is disputed or retiring. Existing
+committee-chain and two-of-four partition scenarios describe the superseded
+design and are not acceptance evidence for Phase 11.5.
+
 ## Level 5: localhost network tests
 
 Exercise actual libp2p transports and framing.
 
 Do not use these for behaviors that can be tested more deterministically at lower levels.
+
+The current `populus-node` localhost integration test uses separate client and
+authority processes and the real transport. It submits a canonical direct
+vote, verifies the signed ACK against the installed membership, queries
+popularity, and verifies the signed response. Authority state is explicitly
+installed by the test; this does not exercise membership discovery, authority
+failover, or a five-process DHT neighborhood. A second localhost integration
+test sends an immutable delegated-ingest report from an installed
+`DelegatedIngestState` to an installed `DelegatedReportReceiver`, then applies
+the signed ACK to the sender's pending buffer. Membership and the individual
+authority contact are explicitly installed; the test does not exercise
+automatic four-authority fanout, recovery, or replacement.
+Observer tests also exercise the runtime `PeerId`-to-verified-`NodeId` mapping:
+two transport identities mapped to one `NodeId` contribute only one
+observation, while distinct `NodeId`s satisfy the observation threshold.
+The candidate-registration localhost test uses separate `PopulusProcess`
+instances and the versioned request/ack protocol. It checks libp2p `PeerId`
+derivation against the candidate signing key and verifies that the receiving
+process authenticates the exact transport peer before indexing the signed
+registration. It does not exercise iterative DHT publication, shard queries,
+automatic reachability challenges, or distributed binding votes.
 
 ## Level 6: fuzzing
 
@@ -271,6 +312,21 @@ random removal order
 ```
 
 Assertions concern the returned nearest set and ordering, not internal K-bucket layout unless K-bucket layout itself is being tested.
+
+## 5.1 Identity and application-message tests
+
+The application decoder is tested independently for canonical round trips,
+unknown versions/tags, trailing bytes, invalid identity-to-NodeId bindings,
+and advertised size/count bounds. Node tests cover persistent PeerId reuse,
+malformed key storage, multiple logical routing tables, identity retirement
+isolation, and a real localhost bootstrap exchange before the joining process
+has an active NodeId.
+
+Identity state-machine tests inject authenticated PeerIds, nonce pairs,
+directness, verifier results, and virtual timestamps. They prove that duplicate
+observers do not satisfy quorum, indirect observations cannot advance state,
+stale challenges fail, and verification expiry moves an identity to Suspect
+rather than preserving Active state indefinitely.
 
 ---
 

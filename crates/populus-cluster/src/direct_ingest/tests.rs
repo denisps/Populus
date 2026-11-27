@@ -2,7 +2,7 @@
 
 use super::{
     DailyPopularityStatus, DirectIngestError, DirectIngestPolicy, DirectIngestState, DirectVote,
-    PersistentLike, SignedDirectVoteAck,
+    PersistentLike, SignedDirectVoteAck, SignedPopularityResponse,
 };
 use crate::{AuthorityKeypair, AuthorityMember, MembershipView, select_authorities};
 use populus_types::{ClientId, ContentId, DailyVoteId, NodeId, UtcDay};
@@ -66,6 +66,56 @@ fn signed_ack(
         .find(|key| key.authority_id() == authority_id)
         .expect("fixture member has a signing key");
     SignedDirectVoteAck::sign(vote, membership, key).expect("member can sign its vote ack")
+}
+
+fn hex_bytes(value: &str) -> Vec<u8> {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    assert!(remainder.is_empty(), "hex vector must have an even length");
+    pairs
+        .iter()
+        .map(|pair| {
+            u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII hex"), 16)
+                .expect("valid hex byte")
+        })
+        .collect()
+}
+
+#[test]
+fn popularity_response_round_trips_and_binds_the_membership_generation() {
+    let content_id = content(9);
+    let day = UtcDay::new(12);
+    let (membership, keys) = make_membership(content_id, 3, 10);
+    let member_id = membership.members()[0].authority_id();
+    let signer = keys
+        .iter()
+        .find(|key| key.authority_id() == member_id)
+        .expect("member signing key");
+    let response =
+        SignedPopularityResponse::sign(content_id, day, &membership, 123.5, false, signer)
+            .expect("current member signs popularity");
+    let expected_hex = include_str!("../../../../testvectors/popularity-response-v1.txt")
+        .lines()
+        .find_map(|line| line.strip_prefix("encoded = "))
+        .expect("popularity vector has encoded bytes");
+    assert_eq!(response.canonical_bytes(), hex_bytes(expected_hex));
+    let decoded = SignedPopularityResponse::deserialize(&response.canonical_bytes())
+        .expect("canonical response decodes");
+    decoded
+        .verify(&membership)
+        .expect("response verifies in its exact view");
+    assert_eq!(decoded.scope(), (content_id, day));
+    assert_eq!(decoded.estimate(), 123.5);
+    assert!(!decoded.finalized());
+
+    let (next_membership, _) = make_membership(content_id, 4, 10);
+    assert_eq!(
+        decoded.verify(&next_membership),
+        Err(DirectIngestError::UnexpectedAcknowledgement)
+    );
+    assert_eq!(
+        SignedPopularityResponse::sign(content_id, day, &membership, f64::NAN, false, signer),
+        Err(DirectIngestError::InvalidPopularityEstimate)
+    );
 }
 
 #[test]

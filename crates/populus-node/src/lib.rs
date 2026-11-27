@@ -1,15 +1,54 @@
 //! Node-level API joining Populus identities and direct votes to the libp2p transport.
 
+mod identity;
+mod persistence;
+mod process;
+
 use populus_cluster::{DirectIngestError, DirectVote};
 use populus_network::{Transport, TransportEvent};
 use populus_types::NodeId;
 
+pub use identity::{
+    IdentityLifecycle, IdentityManager, IdentityManagerConfig, IdentityManagerError,
+    ObservationEvidence, has_independent_observers,
+};
+
 pub use libp2p::{Multiaddr, PeerId};
+pub use persistence::{
+    FilePeerIdentityStore, PeerIdentityError, PeerIdentityStore, load_or_create_peer_identity,
+};
 pub use populus_network::{RequestId, ResponseChannel, SendRequestError, SendResponseError};
-pub use populus_types::NetworkIdentity;
+pub use populus_protocol::{
+    ApplicationErrorCode, ApplicationMessage, ProtocolError, RoutingContact,
+};
+pub use populus_types::{NetworkId, NetworkIdentity};
+pub use process::{
+    ApplicationResponseError, CandidateRegistrationPublicationError, LogicalNode, PopulusProcess,
+    ProcessError, ProcessEvent,
+};
 
 /// A malformed direct-vote payload rejected by the existing canonical decoder.
 pub type DirectVoteRejection = DirectIngestError;
+
+/// Failure to encode or enqueue a versioned application message.
+#[derive(Debug)]
+pub enum ApplicationSendError {
+    /// The typed message violates the versioned wire contract.
+    Encoding(ProtocolError),
+    /// The bounded transport rejected a valid encoded message.
+    Transport(SendRequestError),
+}
+
+impl std::fmt::Display for ApplicationSendError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encoding(error) => write!(formatter, "application message is invalid: {error}"),
+            Self::Transport(error) => write!(formatter, "application send failed: {error:?}"),
+        }
+    }
+}
+
+impl std::error::Error for ApplicationSendError {}
 
 /// Application-facing events emitted by [`Node`].
 #[derive(Debug)]
@@ -21,6 +60,24 @@ pub enum NodeEvent {
         /// The canonical vote or the typed reason decoding failed.
         vote: Result<DirectVote, DirectVoteRejection>,
         /// Capability used to return the transport response.
+        channel: ResponseChannel,
+    },
+    /// A valid non-vote application message received from an authenticated peer.
+    ApplicationRequest {
+        /// The sending transport peer.
+        peer: PeerId,
+        /// Decoded versioned Populus message.
+        message: ApplicationMessage,
+        /// Capability used to return the response.
+        channel: ResponseChannel,
+    },
+    /// An inbound application frame that did not contain a valid v1 envelope.
+    InvalidApplicationRequest {
+        /// The sending transport peer.
+        peer: PeerId,
+        /// The decoder rejection.
+        error: ProtocolError,
+        /// Capability used to return an error response.
         channel: ResponseChannel,
     },
     /// A non-request event forwarded from the transport adapter.
@@ -118,8 +175,31 @@ impl Node {
         peer: PeerId,
         addresses: Vec<Multiaddr>,
         vote: DirectVote,
-    ) -> Result<RequestId, SendRequestError> {
-        self.send_request(peer, addresses, vote.canonical_bytes())
+    ) -> Result<RequestId, ApplicationSendError> {
+        self.send_application_message(
+            peer,
+            addresses,
+            &ApplicationMessage::DirectVote {
+                vote: vote.canonical_bytes(),
+            },
+        )
+    }
+
+    /// Encodes and sends a versioned Populus application message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an encoding error for invalid message fields, or the transport's
+    /// explicit size, queue, and identifier errors.
+    pub fn send_application_message(
+        &mut self,
+        peer: PeerId,
+        addresses: Vec<Multiaddr>,
+        message: &ApplicationMessage,
+    ) -> Result<RequestId, ApplicationSendError> {
+        let payload = message.encode().map_err(ApplicationSendError::Encoding)?;
+        self.send_request(peer, addresses, payload)
+            .map_err(ApplicationSendError::Transport)
     }
 
     /// Replies to an inbound request.
@@ -135,20 +215,35 @@ impl Node {
         self.transport.send_response(channel, response)
     }
 
-    /// Waits for the next event, decoding every inbound request as a direct vote.
+    /// Waits for the next event and decodes inbound application requests.
     ///
-    /// Invalid requests are returned as [`NodeEvent::DirectVoteRequest`] with a
-    /// typed [`DirectVoteRejection`]; they are never presented as successful votes.
+    /// Envelope-decoding failures return [`NodeEvent::InvalidApplicationRequest`].
+    /// Valid envelopes containing malformed vote bytes return
+    /// [`NodeEvent::DirectVoteRequest`] with a typed [`DirectVoteRejection`].
+    /// Callers must handle both events; neither represents an accepted vote.
     pub async fn next_event(&mut self) -> NodeEvent {
         match self.transport.next_event().await {
             TransportEvent::Request {
                 peer,
                 request,
                 channel,
-            } => NodeEvent::DirectVoteRequest {
-                peer,
-                vote: DirectVote::deserialize(&request),
-                channel,
+                ..
+            } => match ApplicationMessage::decode(&request) {
+                Ok(ApplicationMessage::DirectVote { vote }) => NodeEvent::DirectVoteRequest {
+                    peer,
+                    vote: DirectVote::deserialize(&vote),
+                    channel,
+                },
+                Ok(message) => NodeEvent::ApplicationRequest {
+                    peer,
+                    message,
+                    channel,
+                },
+                Err(error) => NodeEvent::InvalidApplicationRequest {
+                    peer,
+                    error,
+                    channel,
+                },
             },
             event => NodeEvent::Transport(event),
         }
@@ -165,7 +260,7 @@ mod tests {
     use populus_cluster::DirectVote;
     use populus_types::{ClientId, ContentId, NodeId, UtcDay};
 
-    use super::{NetworkIdentity, Node, NodeEvent};
+    use super::{ApplicationMessage, NetworkIdentity, Node, NodeEvent};
 
     const EVENT_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -259,12 +354,14 @@ mod tests {
             .expect("listen");
         let address = listening_address(&mut server).await;
         client
-            .send_request(
+            .send_application_message(
                 server.peer_id(),
                 vec![address],
-                b"not a canonical direct vote".to_vec(),
+                &ApplicationMessage::DirectVote {
+                    vote: b"not a canonical direct vote".to_vec(),
+                },
             )
-            .expect("malformed payload fits the transport queue");
+            .expect("malformed vote envelope fits the transport queue");
 
         tokio::time::timeout(EVENT_TIMEOUT, async {
             loop {

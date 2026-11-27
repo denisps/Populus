@@ -3,7 +3,7 @@
 #![allow(unreachable_code)]
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io,
     time::Duration,
 };
@@ -246,10 +246,19 @@ pub enum TransportEvent {
     PeerConnected(libp2p::PeerId),
     /// A peer connection closed.
     PeerDisconnected(libp2p::PeerId),
+    /// An outbound connection attempt failed before establishing a peer.
+    DialFailed {
+        /// Target peer, when it could be derived from the dial address.
+        peer: Option<libp2p::PeerId>,
+        /// Failure description.
+        reason: String,
+    },
     /// An inbound request is ready for application processing.
     Request {
         /// The sending transport peer.
         peer: libp2p::PeerId,
+        /// Direct remote endpoint for the exact connection carrying this request.
+        remote_address: Option<Multiaddr>,
         /// The request payload.
         request: Vec<u8>,
         /// Capability used to return the response.
@@ -285,6 +294,10 @@ pub enum TransportEvent {
 /// with peer identities, addresses, payloads, and transport events.
 pub struct Transport {
     swarm: Swarm<Behaviour>,
+    remote_addresses: HashMap<libp2p::PeerId, Vec<Multiaddr>>,
+    connection_endpoints: HashMap<libp2p::swarm::ConnectionId, (libp2p::PeerId, Multiaddr, bool)>,
+    connected_peers: HashSet<libp2p::PeerId>,
+    direct_connection_counts: HashMap<libp2p::PeerId, u32>,
     active_requests: HashMap<request_response::OutboundRequestId, RequestId>,
     queued_requests: VecDeque<PendingRequest>,
     failed_requests: VecDeque<(libp2p::PeerId, RequestId)>,
@@ -298,8 +311,23 @@ impl Transport {
     ///
     /// Returns an error if a configured transport or DNS resolver cannot be built.
     pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::with_identity(libp2p::identity::Keypair::generate_ed25519())
+    }
+
+    /// Creates a transport with a caller-provided persistent libp2p identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a configured transport or DNS resolver cannot be built.
+    pub fn with_identity(
+        identity: libp2p::identity::Keypair,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
-            swarm: build_swarm()?,
+            swarm: build_swarm(identity)?,
+            remote_addresses: HashMap::new(),
+            connection_endpoints: HashMap::new(),
+            connected_peers: HashSet::new(),
+            direct_connection_counts: HashMap::new(),
             active_requests: HashMap::new(),
             queued_requests: VecDeque::new(),
             failed_requests: VecDeque::new(),
@@ -311,6 +339,22 @@ impl Transport {
     #[must_use]
     pub fn peer_id(&self) -> libp2p::PeerId {
         *self.swarm.local_peer_id()
+    }
+
+    /// Returns the currently observed remote transport addresses for a peer.
+    #[must_use]
+    pub fn remote_addresses(&self, peer: &libp2p::PeerId) -> Option<&[Multiaddr]> {
+        self.remote_addresses.get(peer).map(Vec::as_slice)
+    }
+
+    /// Iterates peers with at least one currently established connection.
+    pub fn connected_peers(&self) -> impl Iterator<Item = libp2p::PeerId> + '_ {
+        self.connected_peers.iter().copied()
+    }
+
+    /// Iterates peers with at least one currently established non-relayed connection.
+    pub fn direct_connected_peers(&self) -> impl Iterator<Item = libp2p::PeerId> + '_ {
+        self.direct_connection_counts.keys().copied()
     }
 
     /// Starts listening on a multiaddress.
@@ -449,27 +493,60 @@ impl Transport {
                 }
                 libp2p::swarm::SwarmEvent::ConnectionEstablished {
                     peer_id,
+                    endpoint,
+                    connection_id,
                     num_established,
                     ..
-                } if num_established.get() == 1 => {
-                    return TransportEvent::PeerConnected(peer_id);
+                } => {
+                    let address = endpoint.get_remote_address().clone();
+                    let is_direct = !endpoint.is_relayed();
+                    if let Some(event) = self.connection_established(
+                        peer_id,
+                        connection_id,
+                        address,
+                        is_direct,
+                        num_established.get(),
+                    ) {
+                        return event;
+                    }
                 }
                 libp2p::swarm::SwarmEvent::ConnectionClosed {
                     peer_id,
-                    num_established: 0,
+                    connection_id,
+                    num_established,
                     ..
                 } => {
-                    self.fail_queued_for(peer_id);
-                    return TransportEvent::PeerDisconnected(peer_id);
+                    if let Some(event) =
+                        self.connection_closed(peer_id, connection_id, num_established)
+                    {
+                        return event;
+                    }
+                }
+                libp2p::swarm::SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                    return TransportEvent::DialFailed {
+                        peer: peer_id,
+                        reason: error.to_string(),
+                    };
                 }
                 libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::Requests(
-                    request_response::Event::Message { peer, message, .. },
+                    request_response::Event::Message {
+                        peer,
+                        connection_id,
+                        message,
+                    },
                 )) => match message {
                     request_response::Message::Request {
                         request, channel, ..
                     } => {
                         return TransportEvent::Request {
                             peer,
+                            remote_address: self
+                                .connection_endpoints
+                                .get(&connection_id)
+                                .filter(|(connected_peer, _, direct)| {
+                                    *connected_peer == peer && *direct
+                                })
+                                .map(|(_, address, _)| address.clone()),
                             request,
                             channel: ResponseChannel(channel),
                         };
@@ -518,6 +595,75 @@ impl Transport {
         }
     }
 
+    fn connection_established(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+        address: Multiaddr,
+        is_direct: bool,
+        num_established: u32,
+    ) -> Option<TransportEvent> {
+        let addresses = self.remote_addresses.entry(peer_id).or_default();
+        self.connection_endpoints
+            .insert(connection_id, (peer_id, address.clone(), is_direct));
+        if !addresses.contains(&address) && addresses.len() < 8 {
+            addresses.push(address);
+        }
+        if is_direct {
+            let count = self.direct_connection_counts.entry(peer_id).or_default();
+            *count = count.saturating_add(1);
+        }
+        if num_established == 1 {
+            self.connected_peers.insert(peer_id);
+            return Some(TransportEvent::PeerConnected(peer_id));
+        }
+        None
+    }
+
+    fn connection_closed(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+        num_established: u32,
+    ) -> Option<TransportEvent> {
+        let closed_connection = self.connection_endpoints.remove(&connection_id);
+        let was_direct = closed_connection.is_some_and(|(_, _, direct)| direct);
+        let mut addresses = self
+            .connection_endpoints
+            .values()
+            .filter(|(connected_peer, _, _)| *connected_peer == peer_id)
+            .map(|(_, address, _)| address.clone())
+            .collect::<Vec<_>>();
+        addresses.sort_unstable_by_key(ToString::to_string);
+        addresses.dedup();
+        addresses.truncate(8);
+        if addresses.is_empty() {
+            self.remote_addresses.remove(&peer_id);
+        } else {
+            self.remote_addresses.insert(peer_id, addresses);
+        }
+        if was_direct {
+            let remove_direct =
+                self.direct_connection_counts
+                    .get_mut(&peer_id)
+                    .is_some_and(|count| {
+                        *count = count.saturating_sub(1);
+                        *count == 0
+                    });
+            if remove_direct {
+                self.direct_connection_counts.remove(&peer_id);
+            }
+        }
+        if num_established == 0 {
+            self.fail_queued_for(peer_id);
+            self.remote_addresses.remove(&peer_id);
+            self.connected_peers.remove(&peer_id);
+            self.direct_connection_counts.remove(&peer_id);
+            return Some(TransportEvent::PeerDisconnected(peer_id));
+        }
+        None
+    }
+
     fn dispatch(&mut self, request: PendingRequest) {
         let network_id = self
             .swarm
@@ -537,8 +683,10 @@ impl Transport {
     }
 }
 
-fn build_swarm() -> Result<Swarm<Behaviour>, Box<dyn std::error::Error + Send + Sync>> {
-    let swarm = SwarmBuilder::with_new_identity()
+fn build_swarm(
+    identity: libp2p::identity::Keypair,
+) -> Result<Swarm<Behaviour>, Box<dyn std::error::Error + Send + Sync>> {
+    let swarm = SwarmBuilder::with_existing_identity(identity)
         .with_tokio()
         .with_tcp(
             tcp::Config::default(),
@@ -725,8 +873,10 @@ mod tests {
     }
 
     async fn request_response_round_trip(protocol: &str) {
-        let mut server = build_swarm().expect("server swarm");
-        let mut client = build_swarm().expect("client swarm");
+        let mut server =
+            build_swarm(libp2p::identity::Keypair::generate_ed25519()).expect("server swarm");
+        let mut client =
+            build_swarm(libp2p::identity::Keypair::generate_ed25519()).expect("client swarm");
         let server_peer = *server.local_peer_id();
         let address: Multiaddr = protocol.parse().expect("loopback multiaddress");
         server.listen_on(address).expect("listen");
@@ -821,7 +971,21 @@ mod tests {
             loop {
                 tokio::select! {
                     event = server.next_event() => {
-                        if let super::TransportEvent::Request { request, channel, .. } = event {
+                        if let super::TransportEvent::Request {
+                            request,
+                            channel,
+                            remote_address,
+                            ..
+                        } = event
+                        {
+                            let remote_address = remote_address.expect("direct endpoint available");
+                            assert!(remote_address.iter().any(|protocol| matches!(
+                                protocol,
+                                Protocol::Ip4(address) if address.is_loopback()
+                            )));
+                            assert!(remote_address.iter().any(|protocol| {
+                                matches!(protocol, Protocol::Tcp(_))
+                            }));
                             server.send_response(channel, request).expect("response channel open");
                         }
                     }

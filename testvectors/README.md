@@ -88,3 +88,30 @@ content-body bytes, a complete signed object and CID, and its mutable genesis
 revision. It includes a fixed Ed25519 producer and signature so other
 implementations can verify the signature preimage and complete encoding
 independently.
+
+## Application-message vector v1
+
+`populus-application-v1.txt` fixes the `POP` marker, v1 envelope tags,
+public network ID, nonce byte order, direct-vote payload length, and typed
+error encoding. Application messages from another configured network are
+rejected before dispatch.
+It also includes fixed encodings for the direct-vote acknowledgement,
+popularity query and response, and delegated-ingest report and acknowledgement
+envelopes, plus candidate-registration request and acknowledgement envelopes.
+The decoder also has behavioral tests for bounded routing contacts,
+multiaddress lengths, unsupported versions, malformed fields, and trailing
+bytes; these are the cases covered here, not an exhaustive decoder audit.
+
+## Ownership vector v1
+
+`ownership-v1.txt` fixes the canonical signed candidate-registration record
+for an Ed25519 transport identity. The cluster test reconstructs the record
+from the fixed seed, normalized IPv4 identity, network identifier, sequence,
+expiry, and direct address, then compares every encoded byte including the
+signature.
+
+## Popularity response vector v1
+
+`popularity-response-v1.txt` fixes the signed `PPST` popularity response bytes.
+The cluster test reconstructs the membership, estimate, and deterministic
+signing key, then compares the full encoding including its signature.

@@ -1,0 +1,54 @@
+# Populus application envelope v1
+# Header: "POP" || version:u8 || network_id:bytes[32] || message_tag:u8.
+# Public network ID: SHA-256("populus/public-network/v1").
+#
+# observed-address-request
+message = RequestObservedAddress
+nonce = 000102030405060708090a0b0c0d0e0f
+encoded = 504f50011f0b23dbc08998aade8b8d78d8086317467b8e1d57dd255ced5cd2908b61774f03000102030405060708090a0b0c0d0e0f
+
+# direct-vote envelope with an opaque four-byte payload (not a valid vote).
+message = DirectVote
+vote_payload = deadbeef
+encoded = 504f50011f0b23dbc08998aade8b8d78d8086317467b8e1d57dd255ced5cd2908b61774f0500000004deadbeef
+
+# typed refusal when no eligible authority is available.
+message = Error
+code = NoActiveAuthority (0x01)
+encoded = 504f50011f0b23dbc08998aade8b8d78d8086317467b8e1d57dd255ced5cd2908b61774f0601
+
+# typed acknowledgement envelope with an opaque two-byte payload.
+message = DirectVoteAck
+acknowledgement_payload = aabb
+encoded = 504f50011f0b23dbc08998aade8b8d78d8086317467b8e1d57dd255ced5cd2908b61774f0700000002aabb
+
+# popularity query for the v1 CID with a zero digest and UTC day zero.
+message = PopularityQuery
+content_id = 017112200000000000000000000000000000000000000000000000000000000000000000
+day = 0000000000000000
+encoded = 504f50011f0b23dbc08998aade8b8d78d8086317467b8e1d57dd255ced5cd2908b61774f080171122000000000000000000000000000000000000000000000000000000000000000000000000000000000
+
+# typed popularity response envelope with an opaque three-byte payload.
+message = PopularityResponse
+response_payload = ccddee
+encoded = 504f50011f0b23dbc08998aade8b8d78d8086317467b8e1d57dd255ced5cd2908b61774f0900000003ccddee
+
+# typed delegated-ingest report envelope with an opaque two-byte payload.
+message = DelegatedIngestReport
+report_payload = 1122
+encoded = 504f50011f0b23dbc08998aade8b8d78d8086317467b8e1d57dd255ced5cd2908b61774f0a000000021122
+
+# typed delegated-ingest acknowledgement envelope with an opaque two-byte payload.
+message = DelegatedIngestAck
+acknowledgement_payload = 3344
+encoded = 504f50011f0b23dbc08998aade8b8d78d8086317467b8e1d57dd255ced5cd2908b61774f0b000000023344
+
+# typed candidate-registration envelope with an opaque two-byte payload.
+message = CandidateRegistration
+registration_payload = 5566
+encoded = 504f50011f0b23dbc08998aade8b8d78d8086317467b8e1d57dd255ced5cd2908b61774f0c000000025566
+
+# typed candidate-registration acknowledgement containing a 32-byte hash.
+message = CandidateRegistrationAck
+registration_hash = 8888888888888888888888888888888888888888888888888888888888888888
+encoded = 504f50011f0b23dbc08998aade8b8d78d8086317467b8e1d57dd255ced5cd2908b61774f0d8888888888888888888888888888888888888888888888888888888888888888
